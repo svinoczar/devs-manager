@@ -1,0 +1,7 @@
+services:
+  api:
+    build: .
+    container_name: devs-manager
+    restart: always
+    env_file:
+      - .env
