@@ -24,7 +24,9 @@ jobs:
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy
-        run: ssh ${{ secrets.SSH_USER }}@${{ secrets.SERVER_HOST }} 
-	     cd ${{ secrets.APP_PATH }}
-	     git pull origin main
-	     docker compose down && docker compose up --build
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            cd ${{ secrets.APP_PATH }}
+            git pull origin main
+            docker compose down && docker compose up --build -d
+          EOF
