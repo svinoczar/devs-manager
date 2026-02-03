@@ -65,7 +65,6 @@ class CommitRepository:
         )
         if since:
             query = query.filter(CommitModel.authored_at >= since)
-            print(query)
         return query.limit(limit).all()
 
 

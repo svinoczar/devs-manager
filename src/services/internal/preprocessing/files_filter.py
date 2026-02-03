@@ -24,7 +24,6 @@ class FilesFilter:
         return patterns
 
     def filter(self, commit: Commit) -> Commit:
-        # print(self.ignore_patterns)
         
         before = len(commit.files)
 

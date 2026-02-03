@@ -15,7 +15,8 @@ class HeuristicCommitClassifier:
         rules = commit_rules.get("rules", [])
 
         # commit_type
-        matched_rule = None
+        default_category = commit_rules.get("default_category", "NO CATEGORY")
+        matched_rule = default_category
         highest_priority = -1
         for rule in rules:
             for keyword in rule.get("keywords", []):
@@ -24,9 +25,7 @@ class HeuristicCommitClassifier:
                         matched_rule = rule
                         highest_priority = rule.get("priority", 0)
 
-        category = matched_rule.get(
-            "category", commit_rules.get("default_category", "NO CATEGORY")
-        )
+        category = matched_rule
         commit_type = category
 
         # is_conventional

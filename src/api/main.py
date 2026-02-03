@@ -1,6 +1,9 @@
 from datetime import datetime
+from http import HTTPStatus
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.params import Depends
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 
@@ -15,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"], 
+)
 
 
 # ---------------------------
@@ -42,19 +52,21 @@ def get_db():
         db.close()
 
 
+#
+
+
 @app.post("/repo/init")
 def api_process_repo(
     req: RepoRequest,
     github_token: str = Header(None, alias="ght"),
-    scope: str = Header(None, alias="acc-scope"), # username:id
+    scope: str = Header(None, alias="acc-scope"),  # username:id
     settings: str = Header(None, alias="analysis-settings"),
 ):
     if not github_token:
         raise HTTPException(status_code=400, detail="GitHub token header missing")
     try:
-        print(scope.split(":"))
         scope_type, scope_id = scope.split(":")
-        process_repo(
+        process_repo_response = process_repo(
             req.owner,
             req.repo,
             token=github_token,
@@ -62,11 +74,26 @@ def api_process_repo(
             scope_id=scope_id,
             settings=settings,
             since=req.since,
-            max_commits=req.max_commits
+            max_commits=req.max_commits,
         )
-        return {"status": "success", "message": f"Processed {req.owner}/{req.repo}"}
+
+        response = {"status": "success"}
+        response["code"] = HTTPStatus.OK
+        # if int(process_repo_response["new-commits"]) == 0:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.NO_CONTENT
+        # else:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.OK
+
+        return JSONResponse(content=response|process_repo_response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/healthcheck")
+def api_process_repo():
+    return {"status": "Alive"}
 
 
 # @app.post("/commits/update")

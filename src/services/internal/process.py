@@ -204,8 +204,10 @@ def process_repo(
                 continue
 
         logger.info("Added %d new commits for %s/%s", len(new_commits), owner, repo)
-
-    return db_repo
+    
+    process_repo_response = {"new-commits": str(len(new_commits)), "repository": repo, "owner": owner}
+    # print ("DB_REPO BEMS BEMS BEMS: {1}", )
+    return process_repo_response
 
 
 # ----------------------
