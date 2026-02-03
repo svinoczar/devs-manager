@@ -1,7 +1,36 @@
 services:
+  db:
+    image: postgres:16
+    container_name: devs-manager-db
+    restart: always
+    environment:
+      POSTGRES_USER: czar
+      POSTGRES_PASSWORD: 1218
+      POSTGRES_DB: devs_manager
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
   api:
     build: .
     container_name: devs-manager
     restart: always
     env_file:
       - .env
+    ports:
+      - "0.0.0.0:8000:8000"
+    depends_on:
+      - db
+    networks:
+      - app-network
+    working_dir: /app
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge

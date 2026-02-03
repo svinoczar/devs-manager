@@ -13,3 +13,4 @@ src/util/__pycache__/Mapper.cpython-312.pyc
 TEST_COMMIT_DIFF.diff
 .DS_Store
 *.pyc
+dump-commit_analytics-202602030023.sql
