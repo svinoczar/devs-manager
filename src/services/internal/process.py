@@ -8,7 +8,6 @@ from src.adapters.db.repositories.repository_repo import RepositoryRepository
 from src.adapters.db.repositories.contributor_repo import ContributorRepository
 from src.adapters.db.repositories.commit_repo import CommitRepository
 from src.adapters.db.repositories.analysis_settings import AnalysisSettingsRepository
-from src.data.domain.commit import Commit
 from src.data.github_api_response.commits_response_entity import SingleCommitEntity
 from src.services.external.github_stats_manual import *
 from src.services.internal.preprocessing.files_filter import FilesFilter

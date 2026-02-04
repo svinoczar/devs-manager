@@ -52,8 +52,12 @@ def get_db():
         db.close()
 
 
-#
 
+@app.post("/healthcheck")
+def api_process_repo():
+    return {"status": "Alive"}
+
+# region repo
 
 @app.post("/repo/init")
 def api_process_repo(
@@ -90,10 +94,79 @@ def api_process_repo(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# endregion
 
-@app.post("/healthcheck")
-def api_process_repo():
-    return {"status": "Alive"}
+# region settings
+@app.get("/settings/")
+def api_process_repo(
+    github_token: str = Header(None, alias="ght"),
+    scope: str = Header(None, alias="acc-scope"),  # username:id
+):
+    if not github_token:
+        raise HTTPException(status_code=400, detail="GitHub token header missing")
+    try:
+        scope_type, scope_id = scope.split(":")
+        process_repo_response = process_repo(
+            req.owner,
+            req.repo,
+            token=github_token,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            settings=settings,
+            since=req.since,
+            max_commits=req.max_commits,
+        )
+
+        response = {"status": "success"}
+        response["code"] = HTTPStatus.OK
+        # if int(process_repo_response["new-commits"]) == 0:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.NO_CONTENT
+        # else:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.OK
+
+        return JSONResponse(content=response|process_repo_response)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# endregion
+
+# region org
+@app.post("/org/add")
+def api_process_repo(
+    github_token: str = Header(None, alias="ght"),
+    scope: str = Header(None, alias="acc-scope"),
+):
+    if not github_token:
+        raise HTTPException(status_code=400, detail="GitHub token header missing")
+    try:
+        scope_type, scope_id = scope.split(":")
+        process_repo_response = process_repo(
+            req.owner,
+            req.repo,
+            token=github_token,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            settings=settings,
+            since=req.since,
+            max_commits=req.max_commits,
+        )
+
+        response = {"status": "success"}
+        response["code"] = HTTPStatus.OK
+        # if int(process_repo_response["new-commits"]) == 0:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.NO_CONTENT
+        # else:
+        #     print(process_repo_response["new-commits"])
+        #     response["code"] = HTTPStatus.OK
+
+        return JSONResponse(content=response|process_repo_response)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# endregion
 
 
 # @app.post("/commits/update")

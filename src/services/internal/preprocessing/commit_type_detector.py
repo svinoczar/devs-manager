@@ -3,7 +3,6 @@ import fnmatch
 import re
 
 from src.data.github_api_response.commits_response_entity import SingleCommitEntity
-from src.data.domain.commit import Commit
 from src.data.enums.analytics import COMMIT_TYPE_PATTERNS, CONVENTIONAL_COMMIT_PATTERN
 
 

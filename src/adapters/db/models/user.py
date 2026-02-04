@@ -2,37 +2,41 @@ from datetime import datetime
 from sqlalchemy import (
     TIMESTAMP,
     String,
-    Text,
-    Integer,
-    Float,
-    ForeignKey,
-    func,
+    Enum as SAEnum,
+    func
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from data.enums.role import Role
 from src.adapters.db.base import Base
 
 
-class AnalysisSettingsModel(Base):
-    __tablename__ = "analysis_settings"
+class UserModel(Base):
+    __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    scope_type: Mapped[str | None] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
 
-    scope_id: Mapped[int | None] = mapped_column(Integer, nullable=False)
+    email: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
 
-    settings: Mapped[str | None] = mapped_column(Text, nullable=False)
-    
+    role: Mapped[Role] = mapped_column(
+        SAEnum(Role, name="role"),
+        nullable=False,
+        default=Role.MEMBER,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
-        nullable=False
+        nullable=False,
     )
+
+    
