@@ -7,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from data.enums.role import Role
+from src.data.enums.role import Role
 from src.adapters.db.base import Base
 
 

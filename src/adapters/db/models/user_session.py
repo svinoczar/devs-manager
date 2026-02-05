@@ -8,7 +8,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from data.enums.vcs import VCS
 from src.adapters.db.base import Base
 
 

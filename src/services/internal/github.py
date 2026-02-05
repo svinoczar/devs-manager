@@ -2,8 +2,8 @@ from ast import Dict
 from collections import defaultdict
 from typing import Any
 
-from data.enums.analytics import COMMENT_SYMBOLS
-from data.enums.language import COMMENT_PATTERNS
+from src.data.enums.analytics import COMMENT_SYMBOLS
+from src.data.enums.language import COMMENT_PATTERNS
 
 
 async def count_meaningful_diff(diff_content: str) -> Dict[str, Any]:

@@ -7,10 +7,10 @@ from src.data.enums.analytics import COMMIT_TYPE_PATTERNS, CONVENTIONAL_COMMIT_P
 
 
 class HeuristicCommitClassifier:
-    def detect(self, commit: SingleCommitEntity, analysis_settings: dict) -> dict:
+    def detect(self, commit: SingleCommitEntity, settings: dict) -> dict:
         commit_sign = commit.commit
         msg = commit_sign.message.lower()
-        commit_rules = analysis_settings.get("commit_rules", {})
+        commit_rules = settings.get("commit_rules", {})
         rules = commit_rules.get("rules", [])
 
         # commit_type

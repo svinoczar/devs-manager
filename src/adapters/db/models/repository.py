@@ -1,5 +1,5 @@
 from datetime import datetime
-from data.enums.vcs import VCS
+from src.data.enums.vcs import VCS
 from sqlalchemy import String, Text, TIMESTAMP, func, ForeignKey, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 

@@ -1,7 +1,6 @@
 from typing import Optional
 
 from src.adapters.db.base import SessionLocal
-from src.adapters.db.repositories.analysis_settings import AnalysisSettingsRepository
 from src.data.github_api_response.commits_response_entity import SingleCommitEntity
 from src.data.domain.commit import Commit
 from src.services.internal.preprocessing.file_language_enricher import (
@@ -29,14 +28,13 @@ class CommitEnricher:
         commit_entity: SingleCommitEntity,
         scope_type,
         scope_id,
-        settings,
         session: SessionLocal,
     ) -> Commit:
-        analysis_settings_repo = AnalysisSettingsRepository(session)
+        team_repo = TeamRepository(session)
 
-        analysis_settings = (
-            analysis_settings_repo
-                .get_or_create(scope_type, scope_id, settings)
+        settings = (
+            team_repo
+                .get_settings(scope_type, scope_id)
                 .settings
         )
 
@@ -47,7 +45,7 @@ class CommitEnricher:
         for file in commit_model.files:
             self.file_enricher.enrich(file)
 
-        commit_meta_data = self.commit_type_detector.detect(commit_entity, analysis_settings)
+        commit_meta_data = self.commit_type_detector.detect(commit_entity, settings)
 
         commit_model.commit_type = commit_meta_data.get("commit_type", "unknown")
         commit_model.is_conventional = commit_meta_data.get("is_conventional", False)
