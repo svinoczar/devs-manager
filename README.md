@@ -6,3 +6,8 @@
 
 ## Start
 ```python3.13 -m uvicorn src.api.main:app --reload```
+
+## Migrations
+```rm alembic/versions/#######_init.py```  
+```alembic revision --autogenerate -m "init"```  
+```alembic upgrade head```

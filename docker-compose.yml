@@ -13,6 +13,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U czar -d devs_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
 
   api:
     build: .
@@ -23,10 +28,10 @@ services:
     ports:
       - "0.0.0.0:8000:8000"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - app-network
-    working_dir: /app
 
 volumes:
   postgres_data:
