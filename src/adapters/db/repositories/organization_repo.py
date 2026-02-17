@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from src.adapters.db.models.organization import OrganizationModel
+from src.adapters.db.models import OrganizationModel
 from src.adapters.db.repositories.base_repository import BaseRepository
 
 

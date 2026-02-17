@@ -14,7 +14,7 @@ class RepositoryModel(Base):
     vcs_provider: Mapped[VCS] = mapped_column(
         SAEnum(VCS, name="vcs_enum"),
         nullable=False,
-        default=VCS.GITHUB,
+        default=VCS.github,
     )
 
     external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -28,7 +28,9 @@ class RepositoryModel(Base):
 
     default_branch: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

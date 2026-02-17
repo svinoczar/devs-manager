@@ -24,7 +24,7 @@ class ProjectModel(Base):
     manager_id: Mapped[int] = mapped_column(ForeignKey("users.id"))  # FK
 
     vcs: Mapped[VCS] = mapped_column(
-        SAEnum(VCS, name="vcs_enum"), nullable=False, default=VCS.GITHUB
+        SAEnum(VCS, name="vcs_enum"), nullable=False, default=VCS.github
     )
 
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))  # FK

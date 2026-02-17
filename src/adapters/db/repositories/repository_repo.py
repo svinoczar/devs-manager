@@ -72,6 +72,10 @@ class RepositoryRepository(BaseRepository[RepositoryModel]):
         )
         return repo, True
 
+    def get_by_team(self, team_id: int) -> list[RepositoryModel]:
+        stmt = select(RepositoryModel).where(RepositoryModel.team_id == team_id)
+        return list(self.db.scalars(stmt).all())
+
     def get_by_project(self, project_id: int) -> list[RepositoryModel]:
         stmt = select(RepositoryModel).where(
             RepositoryModel.project_id == project_id

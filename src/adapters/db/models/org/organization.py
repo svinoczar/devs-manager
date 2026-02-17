@@ -9,6 +9,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.data.enums.vcs import VCS
+from src.data.enums.company_size import CompanySize
 from src.adapters.db.base import Base
 
 
@@ -29,7 +30,13 @@ class OrganizationModel(Base):
     main_vcs: Mapped[VCS] = mapped_column(
         SAEnum(VCS, name="vcs_enum"),
         nullable=False,
-        default=VCS.GITHUB,
+        default=VCS.github,
+    )
+
+    company_size: Mapped[CompanySize] = mapped_column(
+        SAEnum(CompanySize, name="company_size_enum"),
+        nullable=False,
+        default=CompanySize.big,
     )
     
     created_at: Mapped[datetime] = mapped_column(

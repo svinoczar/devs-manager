@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 
+from src.api.routes import auth, org, project, team
 from src.services.internal.process import process_repo
 from src.adapters.db.base import SessionLocal
 from src.adapters.db.repositories.repository_repo import RepositoryRepository
@@ -20,16 +21,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"], 
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# region models
 
-# ---------------------------
-# Pydantic модели для запроса
-# ---------------------------
+app.include_router(auth.router)
+app.include_router(org.router)
+app.include_router(project.router)
+app.include_router(team.router)
+
+
 class RepoRequest(BaseModel):
     owner: str
     repo: str
@@ -52,12 +57,21 @@ def get_db():
         db.close()
 
 
+# endregion
 
-@app.post("/healthcheck")
+
+@app.get("/")
+def root():
+    return {"message": "Welcome to Devs Manager API"}
+
+
+@app.get("/healthcheck")
 def api_process_repo():
     return {"status": "Alive"}
 
+
 # region repo
+
 
 @app.post("/repo/init")
 def api_process_repo(
@@ -90,11 +104,13 @@ def api_process_repo(
         #     print(process_repo_response["new-commits"])
         #     response["code"] = HTTPStatus.OK
 
-        return JSONResponse(content=response|process_repo_response)
+        return JSONResponse(content=response | process_repo_response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # endregion
+
 
 # region settings
 @app.get("/settings/")
@@ -126,11 +142,13 @@ def api_process_repo(
         #     print(process_repo_response["new-commits"])
         #     response["code"] = HTTPStatus.OK
 
-        return JSONResponse(content=response|process_repo_response)
+        return JSONResponse(content=response | process_repo_response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
 # endregion
+
 
 # region org
 @app.post("/org/add")
@@ -162,10 +180,11 @@ def api_process_repo(
         #     print(process_repo_response["new-commits"])
         #     response["code"] = HTTPStatus.OK
 
-        return JSONResponse(content=response|process_repo_response)
+        return JSONResponse(content=response | process_repo_response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
 # endregion
 
 

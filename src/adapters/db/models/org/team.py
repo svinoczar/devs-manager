@@ -26,7 +26,7 @@ class TeamModel(Base):
     vcs: Mapped[VCS] = mapped_column(
         SAEnum(VCS, name="vcs_enum"),
         nullable=False,
-        default=VCS.GITHUB,
+        default=VCS.github,
     )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))  # FK

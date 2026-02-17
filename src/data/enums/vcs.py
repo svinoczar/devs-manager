@@ -1,7 +1,8 @@
 from enum import Enum
 
-class VCS(Enum):
-    GITHUB = "GitHub"
-    GITLAB = "GitLab"
-    BITBUCKET = "Bitbucket"
-    SVM = "SVN"
+
+class VCS(str, Enum):
+    github = "github"
+    gitlab = "gitlab"
+    bitbucket = "bitbucket"
+    svn = "svn"
