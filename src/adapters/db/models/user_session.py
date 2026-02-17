@@ -1,10 +1,10 @@
 from datetime import datetime
 from sqlalchemy import (
     TIMESTAMP,
+    Boolean,
     ForeignKey,
-    String,
+    Text,
     func,
-    Text
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,11 +19,15 @@ class UserSessionModel(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
-    )  # FK
+    )
 
-    token_hash: Mapped[str | None] = mapped_column(Text, nullable=False)
-    
-    refresh_token_hash: Mapped[str | None] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    refresh_token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -33,7 +37,5 @@ class UserSessionModel(Base):
 
     expires_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
         nullable=False,
     )
