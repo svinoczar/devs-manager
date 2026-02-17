@@ -14,7 +14,7 @@ class ContributorModel(Base):
     vcs_provider: Mapped[VCS] = mapped_column(
         SAEnum(VCS, name="vcs_enum"),
         nullable=False,
-        default=VCS.GITHUB,
+        default=VCS.github,
     )
 
     external_id: Mapped[str] = mapped_column(String(128), nullable=False)

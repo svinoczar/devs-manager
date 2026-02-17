@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import TIMESTAMP, Text, func
-from adapters.db.base import Base
+from src.adapters.db.base import Base
 
 from sqlalchemy.orm import Mapped, mapped_column
 

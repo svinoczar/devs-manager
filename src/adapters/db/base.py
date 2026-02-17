@@ -2,9 +2,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 import os
 
-from src.adapters.db.models import *
-
-
 DB_NAME = os.getenv("DB_NAME", "devs_manager")
 DB_USER = os.getenv("DB_USER", "czar")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "1218")
