@@ -1,7 +1,10 @@
+import json
 from urllib.parse import urlparse
+from copy import deepcopy
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -182,3 +185,150 @@ def remove_repo_from_team(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found in this team")
 
     repo_repo.delete(repo_id)
+
+
+# ───────────────────────── Settings ─────────────────────────
+
+DEFAULT_ANALYSIS_CONFIG: dict[str, Any] = {
+    "file_filters": {
+        "exclude_patterns": [
+            "*.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+            "*.min.js", "*.min.css", "dist/", "build/", "node_modules/",
+            "__pycache__/", "*.pyc", "*.egg-info/",
+        ],
+        "exclude_hidden": True,
+    },
+    "commit_classification": {
+        "default_category": "other",
+        "rules": [
+            {"name": "Feature", "category": "feat", "keywords": ["feat", "add", "new", "implement", "introduce"], "priority": 95},
+            {"name": "Bugfix", "category": "fix", "keywords": ["fix", "bug", "patch", "resolve", "repair"], "priority": 99},
+            {"name": "Performance", "category": "perf", "keywords": ["perf", "performance", "optimize", "speed"], "priority": 85},
+            {"name": "Refactor", "category": "refactor", "keywords": ["refactor", "restructure", "rework", "reorganize", "simplify"], "priority": 80},
+            {"name": "Tests", "category": "test", "keywords": ["test", "spec", "coverage"], "priority": 75},
+            {"name": "Docs", "category": "docs", "keywords": ["docs", "doc", "readme", "changelog", "document"], "priority": 70},
+            {"name": "Chore", "category": "chore", "keywords": ["chore", "build", "ci", "cd", "deps", "upgrade", "bump"], "priority": 60},
+            {"name": "Style", "category": "style", "keywords": ["style", "format", "lint", "prettier", "whitespace"], "priority": 55},
+            {"name": "Revert", "category": "revert", "keywords": ["revert", "rollback"], "priority": 90},
+        ],
+    },
+    "special_commits": {
+        "include_merge_commits": False,
+        "include_revert_commits": True,
+        "bot_logins": ["dependabot[bot]", "renovate[bot]", "github-actions[bot]"],
+    },
+    "breaking_change_markers": ["!", "BREAKING CHANGE", "BREAKING-CHANGE"],
+}
+
+DEFAULT_WORKFLOW_CONFIG: dict[str, Any] = {
+    "sprint": {
+        "enabled": False,
+        "duration_days": 14,
+    },
+    "working_hours": {
+        "start": 9,
+        "end": 18,
+        "timezone": "UTC",
+    },
+    "working_days": [1, 2, 3, 4, 5],
+}
+
+DEFAULT_METRICS_CONFIG: dict[str, Any] = {
+    "commit_weights": {
+        "feat": 3.0,
+        "fix": 2.0,
+        "refactor": 2.0,
+        "test": 1.5,
+        "perf": 2.5,
+        "docs": 0.5,
+        "style": 0.5,
+        "chore": 0.5,
+        "ci": 0.5,
+        "build": 0.5,
+        "revert": 0.0,
+    },
+    "significant_commit_min_lines": 5,
+    "require_conventional_commits": False,
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Рекурсивно мержит override поверх base."""
+    result = deepcopy(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+class TeamSettingsResponse(BaseModel):
+    analysis_config: dict[str, Any]
+    workflow_config: dict[str, Any]
+    metrics_config: dict[str, Any]
+
+
+class TeamSettingsUpdate(BaseModel):
+    analysis_config: dict[str, Any] | None = None
+    workflow_config: dict[str, Any] | None = None
+    metrics_config: dict[str, Any] | None = None
+
+
+@router.get("/{team_id}/settings", response_model=TeamSettingsResponse)
+def get_team_settings(
+    team_id: int,
+    current_user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    team_repo = TeamRepository(db)
+    team = team_repo.get_by_id(team_id)
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    if team.manager_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the manager of this team")
+
+    stored_analysis = json.loads(team.analysis_config or "{}")
+    stored_workflow = json.loads(team.workflow_config or "{}")
+    stored_metrics = json.loads(team.metrics_config or "{}")
+
+    return TeamSettingsResponse(
+        analysis_config=_deep_merge(DEFAULT_ANALYSIS_CONFIG, stored_analysis),
+        workflow_config=_deep_merge(DEFAULT_WORKFLOW_CONFIG, stored_workflow),
+        metrics_config=_deep_merge(DEFAULT_METRICS_CONFIG, stored_metrics),
+    )
+
+
+@router.put("/{team_id}/settings", response_model=TeamSettingsResponse)
+def update_team_settings(
+    team_id: int,
+    data: TeamSettingsUpdate,
+    current_user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    team_repo = TeamRepository(db)
+    team = team_repo.get_by_id(team_id)
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    if team.manager_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the manager of this team")
+
+    if data.analysis_config is not None:
+        team.analysis_config = json.dumps(data.analysis_config)
+    if data.workflow_config is not None:
+        team.workflow_config = json.dumps(data.workflow_config)
+    if data.metrics_config is not None:
+        team.metrics_config = json.dumps(data.metrics_config)
+
+    db.commit()
+    db.refresh(team)
+
+    stored_analysis = json.loads(team.analysis_config or "{}")
+    stored_workflow = json.loads(team.workflow_config or "{}")
+    stored_metrics = json.loads(team.metrics_config or "{}")
+
+    return TeamSettingsResponse(
+        analysis_config=_deep_merge(DEFAULT_ANALYSIS_CONFIG, stored_analysis),
+        workflow_config=_deep_merge(DEFAULT_WORKFLOW_CONFIG, stored_workflow),
+        metrics_config=_deep_merge(DEFAULT_METRICS_CONFIG, stored_metrics),
+    )
