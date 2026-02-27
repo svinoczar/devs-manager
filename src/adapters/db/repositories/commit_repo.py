@@ -1,8 +1,10 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
 from src.adapters.db.models.commit import CommitModel
 from src.adapters.db.repositories.base_repository import BaseRepository
+from src.adapters.db.models.contributor import ContributorModel
+from src.adapters.db.models.repository import RepositoryModel
 
 
 class CommitRepository(BaseRepository[CommitModel]):
@@ -151,7 +153,7 @@ class CommitRepository(BaseRepository[CommitModel]):
         ).count()
 
     def get_by_contributor(
-        self, 
+        self,
         contributor_id: int,
         limit: int = 100
     ) -> list[CommitModel]:
@@ -162,3 +164,83 @@ class CommitRepository(BaseRepository[CommitModel]):
             .limit(limit)
         )
         return list(self.db.scalars(stmt).all())
+
+    def get_by_team_date_range(
+        self,
+        team_id: int,
+        since: datetime,
+        until: datetime,
+    ) -> list[CommitModel]:
+        stmt = (
+            select(CommitModel)
+            .join(RepositoryModel, CommitModel.repository_id == RepositoryModel.id)
+            .where(
+                RepositoryModel.team_id == team_id,
+                CommitModel.authored_at >= since,
+                CommitModel.authored_at < until,
+            )
+            .order_by(CommitModel.authored_at)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def get_by_sha(self, sha: str) -> CommitModel | None:
+        stmt = select(CommitModel).where(CommitModel.sha == sha)
+        return self.db.scalar(stmt)
+
+    def get_by_contributor_and_team(
+        self,
+        contributor_id: int,
+        team_id: int,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[CommitModel]:
+        """
+        Получить коммиты конкретного разработчика в команде за период.
+
+        Args:
+            contributor_id: ID контрибьютора
+            team_id: ID команды
+            since: Начало периода (опционально)
+            until: Конец периода (опционально)
+            limit: Максимальное количество коммитов
+            offset: Смещение для пагинации
+
+        Returns:
+            Список коммитов, отсортированных по дате (новые первые)
+        """
+        stmt = (
+            select(CommitModel)
+            .join(RepositoryModel, CommitModel.repository_id == RepositoryModel.id)
+            .where(
+                RepositoryModel.team_id == team_id,
+                CommitModel.contributor_id == contributor_id,
+            )
+        )
+
+        if since:
+            stmt = stmt.where(CommitModel.authored_at >= since)
+        if until:
+            stmt = stmt.where(CommitModel.authored_at < until)
+
+        stmt = stmt.order_by(CommitModel.authored_at.desc()).limit(limit).offset(offset)
+
+        return list(self.db.scalars(stmt).all())
+
+    def count_by_team(self, team_id: int) -> int:
+        """
+        Подсчитывает количество коммитов для команды.
+
+        Args:
+            team_id: ID команды
+
+        Returns:
+            Количество коммитов
+        """
+        stmt = (
+            select(func.count(CommitModel.id))
+            .join(RepositoryModel, CommitModel.repository_id == RepositoryModel.id)
+            .where(RepositoryModel.team_id == team_id)
+        )
+        return self.db.scalar(stmt) or 0
