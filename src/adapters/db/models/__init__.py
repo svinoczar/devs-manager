@@ -9,3 +9,7 @@ from .repository import RepositoryModel
 from .team_member import TeamMemberModel
 from .user_session import UserSessionModel
 from .user import UserModel
+from .pull_request import PullRequestModel
+from .issue import IssueModel
+from .email_verification import EmailVerificationModel
+from .sync_session import SyncSessionModel

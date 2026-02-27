@@ -26,17 +26,9 @@ class CommitEnricher:
         self,
         commit_model: Commit,
         commit_entity: SingleCommitEntity,
-        scope_type,
-        scope_id,
+        settings: str,
         session: SessionLocal,
     ) -> Commit:
-        team_repo = TeamRepository(session)
-
-        settings = (
-            team_repo
-                .get_settings(scope_type, scope_id)
-                .settings
-        )
 
         if not commit_model.files:
             commit_model.commit_type = "unknown"
@@ -45,7 +37,10 @@ class CommitEnricher:
         for file in commit_model.files:
             self.file_enricher.enrich(file)
 
-        commit_meta_data = self.commit_type_detector.detect(commit_entity, settings)
+        # Parse settings from JSON string to dict
+        settings_dict = json.loads(settings) if isinstance(settings, str) else settings
+
+        commit_meta_data = self.commit_type_detector.detect(commit_entity, settings_dict)
 
         commit_model.commit_type = commit_meta_data.get("commit_type", "unknown")
         commit_model.is_conventional = commit_meta_data.get("is_conventional", False)
