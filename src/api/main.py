@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 
-from src.api.routes import auth, org, project, team
+from src.api.routes import auth, org, project, team, stats, sync
 from src.services.internal.process import process_repo
 from src.adapters.db.base import SessionLocal
 from src.adapters.db.repositories.repository_repo import RepositoryRepository
@@ -33,6 +33,8 @@ app.include_router(auth.router)
 app.include_router(org.router)
 app.include_router(project.router)
 app.include_router(team.router)
+app.include_router(stats.router)
+app.include_router(sync.router)
 
 
 class RepoRequest(BaseModel):
