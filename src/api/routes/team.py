@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from src.api.dependencies import get_db, get_current_user
 from src.adapters.db.models.user import UserModel
@@ -21,6 +22,11 @@ from src.adapters.db.repositories.user_repo import UserRepository
 from src.adapters.db.repositories.sync_session_repo import SyncSessionRepository
 from src.adapters.db.repositories.commit_repo import CommitRepository
 from src.adapters.db.models.sync_session import SyncStatus, SyncSessionModel
+from src.adapters.db.models.commit import CommitModel
+from src.adapters.db.models.commit_file import CommitFileModel
+from src.adapters.db.models.team_member import TeamMemberModel
+from src.adapters.db.models.pull_request import PullRequestModel
+from src.adapters.db.models.issue import IssueModel
 from src.services.internal.rate_limiter import RateLimiter
 from src.services.internal.sync_orchestrator import SyncOrchestrator
 from src.services.external.github_stats_manual import get_commit_count
@@ -741,3 +747,80 @@ def _sync_repository_background(
                     db.commit()
             except Exception as db_error:
                 logger.error("Failed to update failed status for session %d: %s", session_id, db_error)
+
+
+# ───────────────────────── Delete ─────────────────────────
+
+@router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_team(
+    team_id: int,
+    current_user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Удаляет команду и все связанные данные (репозитории, коммиты, сессии синхронизации).
+    Требует права manager команды.
+    """
+    team_repo = TeamRepository(db)
+    team = team_repo.get_by_id(team_id)
+
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    if team.manager_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only team manager can delete the team"
+        )
+
+    # Ручное каскадное удаление всех связанных данных
+    # Удаляем в правильном порядке из-за foreign key constraints
+
+    # 1. Получаем все репозитории команды
+    repo_repo = RepositoryRepository(db)
+    repos = repo_repo.get_by_team(team_id)
+
+    # 2. Для каждого репозитория удаляем все связанные данные
+    from src.adapters.db.repositories.commit_file_repo import CommitFileRepository
+    from src.adapters.db.repositories.pull_request_repo import PullRequestRepository
+    from src.adapters.db.repositories.issue_repo import IssueRepository
+
+    commit_repo = CommitRepository(db)
+    commit_file_repo = CommitFileRepository(db)
+    sync_session_repo = SyncSessionRepository(db)
+
+    for repo in repos:
+        # Удаляем commit_files для всех коммитов репозитория
+        commits = db.query(CommitModel).filter(CommitModel.repository_id == repo.id).all()
+        for commit in commits:
+            # Удаляем файлы коммита
+            db.query(CommitFileModel).filter(CommitFileModel.commit_id == commit.id).delete()
+
+        # Удаляем коммиты
+        db.query(CommitModel).filter(CommitModel.repository_id == repo.id).delete()
+
+        # Удаляем PR и Issues (если есть)
+        try:
+            db.query(PullRequestModel).filter(PullRequestModel.repository_id == repo.id).delete()
+        except:
+            pass
+
+        try:
+            db.query(IssueModel).filter(IssueModel.repository_id == repo.id).delete()
+        except:
+            pass
+
+        # Удаляем sync sessions
+        db.query(SyncSessionModel).filter(SyncSessionModel.repository_id == repo.id).delete()
+
+        # Удаляем репозиторий
+        repo_repo.delete(repo.id)
+
+    # 3. Удаляем team_members
+    db.query(TeamMemberModel).filter(TeamMemberModel.team_id == team_id).delete()
+
+    # 4. Удаляем саму команду
+    db.commit()
+    team_repo.delete(team_id)
+
+    logger.info("Team %d deleted by user %d", team_id, current_user.id)

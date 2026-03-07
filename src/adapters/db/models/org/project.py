@@ -29,6 +29,8 @@ class ProjectModel(Base):
 
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))  # FK
 
+    emoji: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
