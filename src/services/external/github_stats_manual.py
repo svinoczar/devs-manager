@@ -3,12 +3,75 @@ import os
 import time
 import requests
 import json
+import logging
 
 from dotenv import load_dotenv
 from src.util.mapper import single_commit_json_to_dto
 
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+def github_request_with_retry(url, headers, params=None, max_retries=5):
+    """
+    Выполняет GitHub API запрос с автоматическим retry при rate limit.
+
+    Args:
+        url: URL для запроса
+        headers: HTTP заголовки
+        params: Query параметры (опционально)
+        max_retries: Максимальное количество попыток
+
+    Returns:
+        Response object
+
+    Raises:
+        requests.HTTPError: Если все попытки исчерпаны
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+
+            # Проверяем rate limit
+            if response.status_code == 403:
+                # Проверяем заголовки rate limit
+                remaining = response.headers.get('X-RateLimit-Remaining', '0')
+                reset_time = response.headers.get('X-RateLimit-Reset', '0')
+
+                if remaining == '0':
+                    # Rate limit достигнут
+                    reset_timestamp = int(reset_time)
+                    current_time = int(time.time())
+                    wait_seconds = max(reset_timestamp - current_time, 60)
+
+                    logger.warning(
+                        f"Rate limit exceeded. Waiting {wait_seconds}s until reset. "
+                        f"Attempt {attempt + 1}/{max_retries}"
+                    )
+
+                    if attempt < max_retries - 1:
+                        time.sleep(wait_seconds)
+                        continue
+                    else:
+                        response.raise_for_status()
+                else:
+                    # 403 по другой причине
+                    response.raise_for_status()
+
+            response.raise_for_status()
+            return response
+
+        except requests.RequestException as e:
+            if attempt == max_retries - 1:
+                raise
+
+            # Exponential backoff для других ошибок
+            wait_time = min(2 ** attempt * 5, 60)  # Max 60 секунд
+            logger.warning(f"Request failed: {e}. Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+
+    raise requests.HTTPError(f"Max retries ({max_retries}) exceeded")
 
 
 def get_commits_list(
@@ -43,20 +106,11 @@ def get_commits_list(
         if since:
             params["since"] = since.isoformat()
 
-        for attempt in range(3):
-            try:
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=60,
-                )
-                response.raise_for_status()
-                break
-            except requests.RequestException as e:
-                if attempt == 2:
-                    raise
-                time.sleep(5)
+        try:
+            response = github_request_with_retry(url, headers, params)
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch commits page {page}: {e}")
+            raise
 
         commits = response.json()
         if not commits:
@@ -164,8 +218,7 @@ def get_commit(owner, repo, ref, token=None):
         "Accept": "application/vnd.github.v3+json",
     }
 
-    response = requests.get(url, headers=headers, timeout=60)
-    response.raise_for_status()
+    response = github_request_with_retry(url, headers)
     return response.json()
 
 
