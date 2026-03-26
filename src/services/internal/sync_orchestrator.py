@@ -6,9 +6,15 @@ import threading
 
 from src.adapters.db.base import SessionLocal
 from src.services.internal.process import process_single_commit, get_existing_commit_shas
-from src.services.external.github_stats_manual import get_commits_list, get_contributors
+from src.services.external.github_stats_manual import get_commits_paginated, get_contributors, get_commits_count
 from src.adapters.db.repositories.contributor_repo import ContributorRepository
+from src.adapters.db.repositories.sync_session_repo import SyncSessionRepository
 from src.util.logger import logger
+
+
+class SyncCancelledException(Exception):
+    """Исключение выбрасывается когда синхронизация отменена пользователем"""
+    pass
 
 
 @dataclass
@@ -69,10 +75,18 @@ class SyncOrchestrator:
         token: str,
         settings: str,
         db_repo_id: int,
-        sprint_days: int = 14
+        sprint_days: int = 14,
+        session_id: int | None = None
     ) -> dict:
         """
-        Синхронизирует репозиторий с приоритетной загрузкой спринта.
+        Синхронизирует репозиторий с приоритетной потоковой загрузкой.
+
+        Процесс:
+        1. Загружаем коммиты постранично
+        2. Каждую страницу сразу разделяем на sprint/archive
+        3. Sprint коммиты обрабатываем немедленно
+        4. Когда вышли за пределы sprint_cutoff - отмечаем sprint_commits_done
+        5. Продолжаем обработку archive коммитов в фоне
 
         Args:
             owner: Владелец репозитория
@@ -83,119 +97,189 @@ class SyncOrchestrator:
             sprint_days: Количество дней для спринта (приоритетная загрузка)
 
         Returns:
-            dict с результатами синхронизации:
-                - total_commits: общее количество коммитов
-                - processed_commits: количество обработанных
-                - sprint_commits: количество коммитов в спринте
-                - archive_commits: количество архивных коммитов
-                - new_commits: количество новых коммитов
-                - errors: список ошибок
+            dict с результатами синхронизации
         """
         self.progress.start_time = datetime.now(timezone.utc)
-        logger.info("Starting sync for %s/%s", owner, repo)
-
-        # Фаза 1: Получение списка SHA
-        self.progress.current_phase = "fetching_list"
-        self._notify_progress()
+        logger.info("[sync_orchestrator:sync_repository] Starting streaming sync for %s/%s (session_id=%s, sprint_days=%d)",
+                   owner, repo, session_id, sprint_days)
 
         sprint_cutoff = datetime.now(timezone.utc) - timedelta(days=sprint_days)
-
-        try:
-            all_commits_list = self._fetch_commits_list_paginated(
-                owner, repo, token
-            )
-        except Exception as e:
-            logger.error("Failed to fetch commits list: %s", e)
-            self.progress.errors.append(f"Failed to fetch commits: {str(e)}")
-            self._notify_progress()
-            raise
-
-        # Разделение на sprint и archive
-        sprint_commits = []
-        archive_commits = []
-
-        for commit_json in all_commits_list:
-            try:
-                commit_date_str = commit_json.get("commit", {}).get("author", {}).get("date")
-                if commit_date_str:
-                    commit_date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
-                    if commit_date >= sprint_cutoff:
-                        sprint_commits.append(commit_json)
-                    else:
-                        archive_commits.append(commit_json)
-                else:
-                    # Если нет даты, считаем архивным
-                    archive_commits.append(commit_json)
-            except Exception as e:
-                logger.warning("Failed to parse commit date for %s: %s", commit_json.get("sha", "?"), e)
-                archive_commits.append(commit_json)
-
-        self.progress.total_commits = len(all_commits_list)
-        logger.info(
-            "Split commits: %d sprint, %d archive (total %d)",
-            len(sprint_commits), len(archive_commits), len(all_commits_list)
-        )
-        self._notify_progress()
+        logger.info("[sync_orchestrator:sync_repository] Sprint cutoff date: %s", sprint_cutoff.isoformat())
 
         # Подготовка: контрибьюторы
+        logger.info("[sync_orchestrator:sync_repository] Phase: preparing contributors")
+        self.progress.current_phase = "preparing"
+        self._notify_progress()
         db_contributors = self._prepare_contributors(owner, repo, token, db_repo_id)
 
-        # Фаза 2: Обработка sprint коммитов (приоритет)
+        # Получаем существующие SHA один раз
+        logger.info("[sync_orchestrator:sync_repository] Getting existing commit SHAs from database")
+        with SessionLocal() as session:
+            existing_shas = get_existing_commit_shas(session, db_repo_id)
+        logger.info("[sync_orchestrator:sync_repository] Found %d existing commits in DB", len(existing_shas))
+
+        # Предварительный подсчёт общего количества коммитов за период спринта
+        # Это позволит сразу показать правильный прогресс (X/Y коммитов)
+        logger.info("[sync_orchestrator:sync_repository] Getting total commits count for sprint period...")
+        try:
+            total_commits_in_period = get_commits_count(
+                owner, repo, token,
+                since=sprint_cutoff  # Только за период спринта
+            )
+            logger.info("[sync_orchestrator:sync_repository] Total commits in sprint period: %d", total_commits_in_period)
+        except Exception as e:
+            logger.warning("[sync_orchestrator:sync_repository] Failed to get commits count: %s, will calculate during processing", e)
+            total_commits_in_period = 0
+
+        # Устанавливаем начальное значение total_commits для прогресса
+        self.progress.total_commits = total_commits_in_period
+        self._notify_progress()
+
+        # Счетчики для отслеживания прогресса синхронизации
+        # sprint_count - количество коммитов в sprint зоне (последние N дней)
+        # archive_count - количество коммитов в archive зоне (старше N дней)
+        # sprint_new/archive_new - количество НОВЫХ коммитов в каждой зоне
+        # total_commits_seen - общее количество просмотренных коммитов (включая существующие)
+        # total_new_commits - только новые коммиты для показа прогресса
+        # in_sprint_zone - флаг того, что мы еще в зоне свежих коммитов
+        sprint_count = 0
+        archive_count = 0
+        sprint_new = 0
+        archive_new = 0
+        total_commits_seen = 0
+        total_new_commits = 0
+        in_sprint_zone = True
+
+        # Фаза 1: Потоковая обработка с приоритетом спринта
+        logger.info("[sync_orchestrator:sync_repository] Phase: processing_sprint (streaming mode)")
         self.progress.current_phase = "processing_sprint"
         self._notify_progress()
 
-        sprint_results = self._process_commits_parallel(
-            sprint_commits, owner, repo, token, settings, db_repo_id, db_contributors
-        )
+        try:
+            for page_data in get_commits_paginated(owner, repo, token):
+                # Проверяем, не отменена ли синхронизация
+                self._check_cancellation(session_id)
 
-        self.progress.sprint_commits_done = True
-        logger.info("Sprint commits processed: %d new", sprint_results["new"])
-        self._notify_progress()
+                commits_on_page = page_data["commits"]
+                page_num = page_data["page"]
 
-        # Фаза 3: Обработка archive коммитов
-        self.progress.current_phase = "processing_archive"
-        self._notify_progress()
+                logger.info(
+                    "[sync_orchestrator:sync_repository] Processing page %d: %d commits (total seen: %d, new: %d)",
+                    page_num, len(commits_on_page), total_commits_seen, total_new_commits
+                )
 
-        archive_results = self._process_commits_parallel(
-            archive_commits, owner, repo, token, settings, db_repo_id, db_contributors
-        )
+                # Разделяем страницу на sprint (приоритет) и archive (фон)
+                # Sprint - последние N дней, нужны для быстрого показа дашборда
+                # Archive - все остальные, обрабатываются в фоне
+                sprint_batch = []
+                archive_batch = []
 
-        logger.info("Archive commits processed: %d new", archive_results["new"])
+                for commit_json in commits_on_page:
+                    total_commits_seen += 1
 
-        # Фаза 4: Завершение
+                    # Пропускаем уже существующие коммиты (дедупликация по SHA)
+                    if commit_json["sha"] in existing_shas:
+                        continue
+
+                    # Это новый коммит - увеличиваем счётчик для показа правильного прогресса
+                    total_new_commits += 1
+
+                    # Определяем категорию по дате
+                    try:
+                        commit_date_str = commit_json.get("commit", {}).get("author", {}).get("date")
+                        if commit_date_str:
+                            commit_date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
+                            is_sprint = commit_date >= sprint_cutoff
+                        else:
+                            is_sprint = False
+                    except Exception as e:
+                        logger.warning("Failed to parse date for %s: %s", commit_json.get("sha", "?")[:7], e)
+                        is_sprint = False
+
+                    if is_sprint:
+                        sprint_batch.append(commit_json)
+                        sprint_count += 1
+                    else:
+                        archive_batch.append(commit_json)
+                        archive_count += 1
+
+                        # Если дошли до архивных коммитов - отмечаем sprint как завершенный
+                        if in_sprint_zone:
+                            in_sprint_zone = False
+                            self.progress.sprint_commits_done = True
+                            self.progress.current_phase = "processing_archive"
+                            logger.info("[sync_orchestrator:sync_repository] ✓ Sprint zone ended at page %d, switching to archive processing (sprint: %d commits, %d new)",
+                                      page_num, sprint_count, sprint_new)
+                            self._notify_progress()
+
+                # Обрабатываем sprint батч сразу
+                if sprint_batch:
+                    logger.info("[sync_orchestrator:sync_repository] Processing %d sprint commits from page %d (workers=%d)",
+                              len(sprint_batch), page_num, self.max_workers)
+                    result = self._process_commits_parallel(
+                        sprint_batch, owner, repo, token, settings, db_repo_id, db_contributors
+                    )
+                    sprint_new += result["new"]
+                    logger.debug("[sync_orchestrator:sync_repository] Sprint batch processed: %d new, %d skipped",
+                               result["new"], result["skipped"])
+
+                # Обрабатываем archive батч (если sprint уже завершен)
+                if archive_batch and not in_sprint_zone:
+                    logger.info("[sync_orchestrator:sync_repository] Processing %d archive commits from page %d (workers=%d)",
+                              len(archive_batch), page_num, self.max_workers)
+                    result = self._process_commits_parallel(
+                        archive_batch, owner, repo, token, settings, db_repo_id, db_contributors
+                    )
+                    archive_new += result["new"]
+                    logger.debug("[sync_orchestrator:sync_repository] Archive batch processed: %d new, %d skipped",
+                               result["new"], result["skipped"])
+
+        except SyncCancelledException as e:
+            logger.info("[sync_orchestrator:sync_repository] ✗ Sync was cancelled: %s", e)
+            self.progress.current_phase = "cancelled"
+            self.progress.errors.append("Синхронизация отменена пользователем")
+            self._notify_progress()
+            # Не поднимаем исключение дальше - это нормальное завершение
+            return {
+                "total_commits": total_commits_seen,
+                "processed_commits": self.progress.processed_commits,
+                "sprint_commits": sprint_count,
+                "archive_commits": archive_count,
+                "new_commits": sprint_new + archive_new,
+                "errors": self.progress.errors,
+                "cancelled": True,
+            }
+        except Exception as e:
+            logger.error("[sync_orchestrator:sync_repository] ✗ Streaming sync failed: %s", e, exc_info=True)
+            self.progress.errors.append(f"Sync error: {str(e)}")
+            self._notify_progress()
+            raise
+
+        # Финализация
+        if in_sprint_zone:
+            # Если все коммиты были в sprint зоне
+            logger.info("[sync_orchestrator:sync_repository] All commits were in sprint zone, marking sprint as done")
+            self.progress.sprint_commits_done = True
+
         self.progress.current_phase = "complete"
         self._notify_progress()
 
-        total_new = sprint_results["new"] + archive_results["new"]
-        logger.info("Sync completed for %s/%s: %d new commits", owner, repo, total_new)
+        total_new = sprint_new + archive_new
+        duration = (datetime.now(timezone.utc) - self.progress.start_time).total_seconds()
+        logger.info(
+            "[sync_orchestrator:sync_repository] ✓ Sync completed for %s/%s in %.2fs: %d total seen, %d sprint (%d new), %d archive (%d new)",
+            owner, repo, duration, total_commits_seen, sprint_count, sprint_new, archive_count, archive_new
+        )
 
         return {
-            "total_commits": self.progress.total_commits,
+            "total_commits": total_commits_seen,
             "processed_commits": self.progress.processed_commits,
-            "sprint_commits": len(sprint_commits),
-            "archive_commits": len(archive_commits),
+            "sprint_commits": sprint_count,
+            "archive_commits": archive_count,
             "new_commits": total_new,
             "errors": self.progress.errors,
         }
 
-    def _fetch_commits_list_paginated(
-        self, owner: str, repo: str, token: str
-    ) -> list[dict]:
-        """
-        Получает список всех коммитов с пагинацией.
-
-        Args:
-            owner: Владелец репозитория
-            repo: Название репозитория
-            token: GitHub токен
-
-        Returns:
-            Список коммитов (сокращенная форма из списка)
-        """
-        logger.info("Fetching commits list for %s/%s", owner, repo)
-        commits = get_commits_list(owner, repo, token=token)
-        logger.info("Fetched %d commits", len(commits))
-        return commits
 
     def _prepare_contributors(
         self, owner: str, repo: str, token: str, db_repo_id: int
@@ -215,10 +299,11 @@ class SyncOrchestrator:
         from src.services.external.github_stats_manual import get_contributors
         from src.util.mapper import git_commit_authors_json_to_dto_list
 
-        logger.info("Fetching contributors for %s/%s", owner, repo)
+        logger.info("[sync_orchestrator:_prepare_contributors] Fetching contributors for %s/%s", owner, repo)
 
         contributors_json = get_contributors(owner, repo, token=token)
         dto_contributors = git_commit_authors_json_to_dto_list(contributors_json)
+        logger.debug("[sync_orchestrator:_prepare_contributors] Received %d contributors from GitHub", len(dto_contributors))
 
         db_contributors = {}
         with SessionLocal() as session:
@@ -234,8 +319,10 @@ class SyncOrchestrator:
                     profile_url=c.html_url,
                 )
                 db_contributors[c.login] = db_c.id  # Сохраняем только ID, не объект
+                if created:
+                    logger.debug("[sync_orchestrator:_prepare_contributors] Created new contributor: %s", c.login)
 
-        logger.info("Prepared %d contributors", len(db_contributors))
+        logger.info("[sync_orchestrator:_prepare_contributors] ✓ Prepared %d contributors", len(db_contributors))
         return db_contributors
 
     def _process_commits_parallel(
@@ -279,11 +366,14 @@ class SyncOrchestrator:
         skipped_count = len(commits_list) - len(commits_to_process)
 
         if skipped_count > 0:
-            logger.info("Skipping %d existing commits", skipped_count)
+            logger.debug("[sync_orchestrator:_process_commits_parallel] Skipping %d existing commits", skipped_count)
 
         if not commits_to_process:
-            logger.info("No new commits to process")
+            logger.debug("[sync_orchestrator:_process_commits_parallel] No new commits to process")
             return {"new": 0, "skipped": skipped_count}
+
+        logger.info("[sync_orchestrator:_process_commits_parallel] Starting parallel processing of %d commits with %d workers",
+                   len(commits_to_process), self.max_workers)
 
         # Обрабатываем в пуле потоков
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -307,12 +397,14 @@ class SyncOrchestrator:
                         self._notify_progress()
 
                 except Exception as e:
-                    logger.error("Failed to process commit %s: %s", sha[:7], e)
+                    logger.error("[sync_orchestrator:_process_commits_parallel] ✗ Failed to process commit %s: %s", sha[:7], e)
                     with self.lock:
                         self.progress.errors.append(f"Commit {sha[:7]}: {str(e)}")
                         self.progress.processed_commits += 1
                         self._notify_progress()
 
+        logger.info("[sync_orchestrator:_process_commits_parallel] ✓ Parallel processing complete: %d new commits created",
+                   new_count)
         return {"new": new_count, "skipped": skipped_count}
 
     def _process_single_commit_wrapper(
@@ -343,6 +435,9 @@ class SyncOrchestrator:
         # Rate limiting
         self.rate_limiter.acquire()
 
+        sha = commit_json.get("sha", "unknown")
+        logger.debug("[sync_orchestrator:_process_single_commit_wrapper] Processing commit %s", sha[:7])
+
         # Создаем отдельную сессию для этого потока
         with SessionLocal() as session:
             try:
@@ -356,9 +451,12 @@ class SyncOrchestrator:
                     db_contributors=db_contributors,
                     session=session
                 )
+                if result["created"]:
+                    logger.debug("[sync_orchestrator:_process_single_commit_wrapper] ✓ Created commit %s", sha[:7])
                 return result
             except Exception as e:
-                logger.error("Error processing commit %s: %s", commit_json.get("sha", "?"), e)
+                logger.error("[sync_orchestrator:_process_single_commit_wrapper] ✗ Error processing commit %s: %s",
+                           sha[:7], e)
                 raise
 
     def _notify_progress(self):
@@ -368,3 +466,25 @@ class SyncOrchestrator:
                 self.progress_callback(self.progress)
             except Exception as e:
                 logger.warning("Progress callback failed: %s", e)
+
+    def _check_cancellation(self, session_id: int | None) -> None:
+        """
+        Проверяет, не была ли отменена синхронизация.
+        Выбрасывает SyncCancelledException если синхронизация отменена.
+        """
+        if not session_id:
+            return
+
+        try:
+            with SessionLocal() as session:
+                sync_repo = SyncSessionRepository(session)
+                sync_session = sync_repo.get_by_id(session_id)
+
+                if sync_session and sync_session.status.value == "cancelled":
+                    logger.warning("[sync_orchestrator:_check_cancellation] ⚠ Sync session %d was cancelled, aborting", session_id)
+                    raise SyncCancelledException(f"Sync session {session_id} was cancelled")
+        except SyncCancelledException:
+            raise
+        except Exception as e:
+            logger.error("[sync_orchestrator:_check_cancellation] Failed to check cancellation status: %s", e)
+            # Не прерываем синхронизацию если не можем проверить статус

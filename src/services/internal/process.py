@@ -169,6 +169,7 @@ def process_repo(
                     conventional_scope=commit_obj.conventional_scope,
                     is_breaking_change=commit_obj.is_breaking_change,
                     is_merge_commit=commit_obj.is_merge_commit,
+                    is_pr_commit=commit_obj.is_pr_commit,
                     is_revert_commit=commit_obj.is_revert_commit,
                     parents_count=commit_obj.parents_count,
                     files_changed=commit_obj.files_changed,
@@ -347,20 +348,32 @@ def process_single_commit(
     Raises:
         Exception: При ошибках обработки
     """
-    if "author" not in commit_json or not commit_json["author"]:
-        return {"created": False, "sha": commit_json["sha"]}
-
-    login = commit_json["author"]["login"]
     sha = commit_json["sha"]
 
+    if "author" not in commit_json or not commit_json["author"]:
+        logger.debug("[process:process_single_commit] Skipping commit %s: no author", sha[:7])
+        return {"created": False, "sha": sha}
+
+    login = commit_json["author"]["login"]
+    logger.debug("[process:process_single_commit] Starting processing commit %s by %s", sha[:7], login)
+
     # Получаем полный коммит с файлами и статистикой
+    logger.debug("[process:process_single_commit] Fetching full commit details for %s", sha[:7])
     full_commit_json = get_commit(owner, repo, sha, token=token)
 
     # Преобразуем в domain commit
+    logger.debug("[process:process_single_commit] Converting commit %s to domain model", sha[:7])
     commit_dto = single_commit_json_to_dto(full_commit_json)
     commit_obj = single_commit_dto_to_domain_commit_dto(commit_dto)
+    logger.debug("[process:process_single_commit] Commit %s has %d files changed", sha[:7], len(commit_obj.files))
 
-    # Инициализация пайплайна обогащения
+    # Инициализация пайплайна обогащения коммита
+    # Пайплайн состоит из нескольких этапов:
+    # 1. FilesFilter - фильтрует служебные файлы (lock, dist, node_modules и т.д.)
+    # 2. FileLanguageEnricher - определяет язык программирования для каждого файла
+    # 3. CommitTypeDetector - классифицирует коммит (feat, fix, refactor и т.д.)
+    # 4. CommitEnricher - объединяет все этапы и добавляет метаданные
+    logger.debug("[process:process_single_commit] Initializing enrichment pipeline for %s", sha[:7])
     files_filter = FilesFilter()
     file_enricher = FileLanguageEnricher(lang_detector)
     commit_type_detector = HeuristicCommitClassifier()
@@ -368,17 +381,23 @@ def process_single_commit(
         file_enricher=file_enricher, commit_type_detector=commit_type_detector
     )
 
-    # Фильтрация и обогащение
+    # Запускаем пайплайн обогащения:
+    # 1. Фильтруем ненужные файлы
+    # 2. Обогащаем метаданными (тип, язык, категория и т.д.)
+    logger.debug("[process:process_single_commit] Running enrichment pipeline for %s", sha[:7])
     commit_obj = files_filter.filter(commit_obj)
     commit_obj = commit_enricher.enrich(
         commit_obj, commit_dto, settings, session
     )
+    logger.debug("[process:process_single_commit] After enrichment: %d files, type=%s",
+               len(commit_obj.files), commit_obj.commit_type)
 
     # Получаем репозитории
     commit_repo = CommitRepository(session)
     commit_file_repo = CommitFileRepository(session)
 
     # Создаем коммит в БД с базовыми полями
+    logger.debug("[process:process_single_commit] Creating DB record for commit %s", sha[:7])
     db_commit = commit_repo.create(
         repository_id=db_repo_id,
         contributor_id=(
@@ -389,8 +408,10 @@ def process_single_commit(
         sha=commit_obj.sha,
         message=commit_obj.message,
     )
+    logger.debug("[process:process_single_commit] Created commit record with id=%d", db_commit.id)
 
     # Обновляем метаданные коммита
+    logger.debug("[process:process_single_commit] Updating commit %s metadata", sha[:7])
     commit_repo.update_details(
         commit_id=db_commit.id,
         authored_at=commit_dto.commit.author.date,
@@ -406,12 +427,14 @@ def process_single_commit(
         conventional_scope=commit_obj.conventional_scope,
         is_breaking_change=commit_obj.is_breaking_change,
         is_merge_commit=commit_obj.is_merge_commit,
+        is_pr_commit=commit_obj.is_pr_commit,
         is_revert_commit=commit_obj.is_revert_commit,
         parents_count=commit_obj.parents_count,
         files_changed=commit_obj.files_changed,
     )
 
     # Сохраняем файлы коммита
+    logger.debug("[process:process_single_commit] Saving %d files for commit %s", len(commit_obj.files), sha[:7])
     files_models = []
     for f in commit_obj.files:
         files_models.append(
@@ -433,8 +456,12 @@ def process_single_commit(
     if files_models:
         commit_file_repo.bulk_create(files_models)
         session.commit()  # Коммитим все изменения
+        logger.debug("[process:process_single_commit] ✓ Saved %d files for commit %s", len(files_models), sha[:7])
 
-    logger.debug("Processed commit %s for %s/%s", sha[:7], owner, repo)
+    logger.debug("[process:process_single_commit] ✓ Successfully processed commit %s for %s/%s (type=%s, +%d/-%d)",
+               sha[:7], owner, repo, commit_obj.commit_type,
+               commit_dto.stats.additions if commit_dto.stats else 0,
+               commit_dto.stats.deletions if commit_dto.stats else 0)
 
     return {"created": True, "sha": sha}
 

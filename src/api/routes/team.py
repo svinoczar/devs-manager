@@ -218,8 +218,8 @@ DEFAULT_ANALYSIS_CONFIG: dict[str, Any] = {
         ],
         "exclude_hidden": True,
     },
-    "commit_classification": {
-        "default_category": "other",
+    "commit_rules": {
+        "default_category": "NO CATEGORY",
         "rules": [
             {"name": "Feature", "category": "feat", "keywords": ["feat", "add", "new", "implement", "introduce"], "priority": 95},
             {"name": "Bugfix", "category": "fix", "keywords": ["fix", "bug", "patch", "resolve", "repair"], "priority": 99},
@@ -230,6 +230,7 @@ DEFAULT_ANALYSIS_CONFIG: dict[str, Any] = {
             {"name": "Chore", "category": "chore", "keywords": ["chore", "build", "ci", "cd", "deps", "upgrade", "bump"], "priority": 60},
             {"name": "Style", "category": "style", "keywords": ["style", "format", "lint", "prettier", "whitespace"], "priority": 55},
             {"name": "Revert", "category": "revert", "keywords": ["revert", "rollback"], "priority": 90},
+            {"name": "Merge", "category": "merge", "keywords": ["merge pull request", "merge branch", "merge mr"], "priority": 120},
         ],
     },
     "special_commits": {
@@ -577,14 +578,18 @@ def sync_team_repos(
     Возвращает session_ids для отслеживания прогресса через SSE.
     Использует сохранённый GitHub-токен текущего пользователя.
     """
+    logger.info("[team:sync_team_repos] Sync request for team_id=%d from user_id=%d", team_id, current_user.id)
+
     team_repo = TeamRepository(db)
     team = team_repo.get_by_id(team_id)
     if not team:
+        logger.warning("[team:sync_team_repos] Team %d not found", team_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
 
     user_repo = UserRepository(db)
     github_token = user_repo.get_github_token(current_user)
     if not github_token:
+        logger.warning("[team:sync_team_repos] No GitHub token for user %d", current_user.id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="GitHub token not configured. Go to Settings → VCS Tokens.",
@@ -593,15 +598,19 @@ def sync_team_repos(
     repo_repo = RepositoryRepository(db)
     repos = repo_repo.get_by_team(team_id)
     if not repos:
+        logger.warning("[team:sync_team_repos] No repositories linked to team %d", team_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No repositories linked to this team.",
         )
 
+    logger.info("[team:sync_team_repos] Found %d repositories for team %d", len(repos), team_id)
+
     # Проверяем количество активных синхронизаций (ограничение 3 на команду)
     sync_repo = SyncSessionRepository(db)
     active_sessions = sync_repo.get_active_by_team(team_id)
     if len(active_sessions) >= 3:
+        logger.warning("[team:sync_team_repos] Too many active sessions for team %d: %d", team_id, len(active_sessions))
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Too many active sync sessions ({len(active_sessions)}). Please wait for current syncs to complete.",
@@ -609,9 +618,9 @@ def sync_team_repos(
 
     stored_analysis = json.loads(team.analysis_config or "{}")
     settings = json.dumps({
-        "commit_classification": stored_analysis.get(
-            "commit_classification",
-            DEFAULT_ANALYSIS_CONFIG["commit_classification"]
+        "commit_rules": stored_analysis.get(
+            "commit_rules",
+            DEFAULT_ANALYSIS_CONFIG["commit_rules"]
         )
     })
 
@@ -619,13 +628,17 @@ def sync_team_repos(
 
     # Создаем sync session для каждого репо и запускаем в фоновом потоке
     for repo in repos:
+        logger.info("[team:sync_team_repos] Creating sync session for repo %s/%s (id=%d)",
+                   repo.owner, repo.name, repo.id)
         sync_session = sync_repo.create_session(
             team_id=team_id,
             repository_id=repo.id
         )
         session_ids.append(sync_session.id)
+        logger.debug("[team:sync_team_repos] Created sync session id=%d for repo %d", sync_session.id, repo.id)
 
         # Запускаем синхронизацию в отдельном потоке
+        logger.info("[team:sync_team_repos] Starting background thread for session %d", sync_session.id)
         thread = threading.Thread(
             target=_sync_repository_background,
             args=(
@@ -636,12 +649,14 @@ def sync_team_repos(
                 github_token,
                 settings,
             ),
-            daemon=True
+            daemon=True,
+            name=f"sync-{sync_session.id}"
         )
         thread.start()
+        logger.debug("[team:sync_team_repos] Background thread started: %s", thread.name)
 
     logger.info(
-        "Started sync for team %d: %d repositories, session_ids: %s",
+        "[team:sync_team_repos] ✓ Started sync for team %d: %d repositories, session_ids=%s",
         team_id, len(repos), session_ids
     )
 
@@ -672,6 +687,9 @@ def _sync_repository_background(
         token: GitHub токен
         settings: JSON строка с настройками анализа
     """
+    logger.info("[team:_sync_repository_background] Background sync started for session %d: %s/%s",
+               session_id, owner, repo)
+
     from src.adapters.db.base import SessionLocal
 
     with SessionLocal() as db:
@@ -679,20 +697,26 @@ def _sync_repository_background(
 
         try:
             # Обновляем статус на running
+            logger.debug("[team:_sync_repository_background] Fetching sync session %d", session_id)
             sync_session = sync_repo.get_by_id(session_id)
             if not sync_session:
-                logger.error("Sync session %d not found", session_id)
+                logger.error("[team:_sync_repository_background] ✗ Sync session %d not found", session_id)
                 return
 
+            logger.info("[team:_sync_repository_background] Updating session %d status to running", session_id)
             sync_session.status = SyncStatus.running
             sync_session.started_at = datetime.now(timezone.utc)
             db.commit()
 
-            logger.info("Starting background sync for session %d: %s/%s", session_id, owner, repo)
+            logger.info("[team:_sync_repository_background] Starting orchestrator for session %d: %s/%s",
+                       session_id, owner, repo)
 
             # Callback для обновления прогресса
             def progress_callback(progress):
                 try:
+                    logger.debug("[team:_sync_repository_background:progress_callback] Updating progress for session %d: %d/%d commits, phase=%s, sprint_done=%s",
+                               session_id, progress.processed_commits, progress.total_commits,
+                               progress.current_phase, progress.sprint_commits_done)
                     sync_repo.update_progress(
                         session_id=session_id,
                         total_commits=progress.total_commits,
@@ -701,52 +725,72 @@ def _sync_repository_background(
                         sprint_commits_done=progress.sprint_commits_done,
                     )
                 except Exception as e:
-                    logger.warning("Failed to update progress for session %d: %s", session_id, e)
+                    logger.warning("[team:_sync_repository_background:progress_callback] ⚠ Failed to update progress for session %d: %s",
+                                 session_id, e)
 
             # Запускаем оркестратор
+            logger.info("[team:_sync_repository_background] Initializing orchestrator (max_workers=5, sprint_days=14)")
             orchestrator = SyncOrchestrator(
                 rate_limiter=_global_rate_limiter,
                 max_workers=5,
                 progress_callback=progress_callback
             )
 
+            logger.info("[team:_sync_repository_background] Starting orchestrator.sync_repository()")
             result = orchestrator.sync_repository(
                 owner=owner,
                 repo=repo,
                 token=token,
                 settings=settings,
                 db_repo_id=db_repo_id,
-                sprint_days=14
+                sprint_days=14,
+                session_id=session_id
             )
 
             # Финализация
+            logger.info("[team:_sync_repository_background] Orchestrator completed, finalizing session %d", session_id)
             sync_session = sync_repo.get_by_id(session_id)
-            sync_session.status = SyncStatus.completed
-            sync_session.completed_at = datetime.now(timezone.utc)
+
+            # Если синхронизация была отменена, не меняем статус
+            if not result.get("cancelled"):
+                logger.info("[team:_sync_repository_background] Marking session %d as completed", session_id)
+                sync_session.status = SyncStatus.completed
+                sync_session.completed_at = datetime.now(timezone.utc)
+
             sync_session.result = result
-            sync_session.new_commits = result["new_commits"]
+            sync_session.new_commits = result.get("new_commits", 0)
             if result.get("errors"):
+                logger.warning("[team:_sync_repository_background] Session %d completed with %d errors",
+                             session_id, len(result["errors"]))
                 sync_session.errors = {"errors": result["errors"]}
             db.commit()
 
-            logger.info(
-                "Completed sync for session %d: %d new commits",
-                session_id, result["new_commits"]
-            )
+            if result.get("cancelled"):
+                logger.info("[team:_sync_repository_background] ⚠ Sync for session %d was cancelled", session_id)
+            else:
+                logger.info(
+                    "[team:_sync_repository_background] ✓ Completed sync for session %d: %d new commits (total: %d commits, %d sprint, %d archive)",
+                    session_id, result.get("new_commits", 0), result.get("total_commits", 0),
+                    result.get("sprint_commits", 0), result.get("archive_commits", 0)
+                )
 
         except Exception as e:
-            logger.error("Sync failed for session %d: %s", session_id, e)
+            logger.error("[team:_sync_repository_background] ✗ Sync failed for session %d: %s",
+                       session_id, e, exc_info=True)
 
             # Обработка ошибки
             try:
+                logger.info("[team:_sync_repository_background] Updating session %d status to failed", session_id)
                 sync_session = sync_repo.get_by_id(session_id)
                 if sync_session:
                     sync_session.status = SyncStatus.failed
                     sync_session.completed_at = datetime.now(timezone.utc)
                     sync_session.errors = {"errors": [str(e)]}
                     db.commit()
+                    logger.info("[team:_sync_repository_background] Session %d marked as failed", session_id)
             except Exception as db_error:
-                logger.error("Failed to update failed status for session %d: %s", session_id, db_error)
+                logger.error("[team:_sync_repository_background] ✗ Failed to update failed status for session %d: %s",
+                           session_id, db_error)
 
 
 # ───────────────────────── Delete ─────────────────────────
@@ -776,9 +820,33 @@ def delete_team(
     # Ручное каскадное удаление всех связанных данных
     # Удаляем в правильном порядке из-за foreign key constraints
 
+    # 0. СНАЧАЛА отменяем все активные синхронизации
+    sync_session_repo = SyncSessionRepository(db)
+    active_sessions = sync_session_repo.get_active_by_team(team_id)
+
+    if active_sessions:
+        logger.info("Cancelling %d active sync sessions for team %d", len(active_sessions), team_id)
+        for session in active_sessions:
+            session.status = SyncStatus.cancelled
+            session.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
+        # Даем потокам время завершиться (до 5 секунд)
+        import time
+        for i in range(10):
+            time.sleep(0.5)
+            db.refresh(session)  # Обновляем статус из БД
+            # Проверяем, все ли потоки завершились
+            remaining = sync_session_repo.get_active_by_team(team_id)
+            if not remaining:
+                logger.info("All sync threads terminated for team %d", team_id)
+                break
+
     # 1. Получаем все репозитории команды
+    logger.info("Step 1: Getting repositories for team %d", team_id)
     repo_repo = RepositoryRepository(db)
     repos = repo_repo.get_by_team(team_id)
+    logger.info("Found %d repositories", len(repos))
 
     # 2. Для каждого репозитория удаляем все связанные данные
     from src.adapters.db.repositories.commit_file_repo import CommitFileRepository
@@ -787,40 +855,78 @@ def delete_team(
 
     commit_repo = CommitRepository(db)
     commit_file_repo = CommitFileRepository(db)
-    sync_session_repo = SyncSessionRepository(db)
 
-    for repo in repos:
-        # Удаляем commit_files для всех коммитов репозитория
-        commits = db.query(CommitModel).filter(CommitModel.repository_id == repo.id).all()
-        for commit in commits:
-            # Удаляем файлы коммита
-            db.query(CommitFileModel).filter(CommitFileModel.commit_id == commit.id).delete()
+    for idx, repo in enumerate(repos):
+        logger.info("Step 2.%d: Processing repository %d (%s)", idx+1, repo.id, repo.name)
 
-        # Удаляем коммиты
-        db.query(CommitModel).filter(CommitModel.repository_id == repo.id).delete()
+        # Получаем ID всех коммитов репозитория
+        logger.info("  Getting commit IDs for repo %d", repo.id)
+        commit_ids = db.query(CommitModel.id).filter(CommitModel.repository_id == repo.id).all()
+        commit_ids = [c_id for (c_id,) in commit_ids]
+        logger.info("  Found %d commits", len(commit_ids))
+
+        # Bulk delete commit_files для всех коммитов (батчами по 1000)
+        if commit_ids:
+            logger.info("  Deleting commit files for %d commits", len(commit_ids))
+            batch_size = 1000
+            for i in range(0, len(commit_ids), batch_size):
+                batch = commit_ids[i:i + batch_size]
+                db.query(CommitFileModel).filter(CommitFileModel.commit_id.in_(batch)).delete(synchronize_session=False)
+                db.commit()  # Коммитим после каждого батча
+                logger.info("  Deleted commit files batch %d-%d", i, min(i + batch_size, len(commit_ids)))
+            logger.info("  All commit files deleted")
+
+        # Удаляем коммиты (батчами если их много)
+        logger.info("  Deleting %d commits for repo %d", len(commit_ids), repo.id)
+        if len(commit_ids) > 1000:
+            # Если коммитов много - удаляем батчами
+            for i in range(0, len(commit_ids), batch_size):
+                batch = commit_ids[i:i + batch_size]
+                db.query(CommitModel).filter(CommitModel.id.in_(batch)).delete(synchronize_session=False)
+                db.commit()  # Коммитим после каждого батча
+                logger.info("  Deleted commits batch %d-%d", i, min(i + batch_size, len(commit_ids)))
+        else:
+            # Если мало - можно одним запросом
+            db.query(CommitModel).filter(CommitModel.repository_id == repo.id).delete(synchronize_session=False)
+            db.commit()
+        logger.info("  All commits deleted")
 
         # Удаляем PR и Issues (если есть)
         try:
-            db.query(PullRequestModel).filter(PullRequestModel.repository_id == repo.id).delete()
-        except:
-            pass
+            logger.info("  Deleting PRs for repo %d", repo.id)
+            db.query(PullRequestModel).filter(PullRequestModel.repository_id == repo.id).delete(synchronize_session=False)
+        except Exception as e:
+            logger.warning("  Failed to delete PRs: %s", e)
 
         try:
-            db.query(IssueModel).filter(IssueModel.repository_id == repo.id).delete()
-        except:
-            pass
+            logger.info("  Deleting issues for repo %d", repo.id)
+            db.query(IssueModel).filter(IssueModel.repository_id == repo.id).delete(synchronize_session=False)
+        except Exception as e:
+            logger.warning("  Failed to delete issues: %s", e)
 
         # Удаляем sync sessions
-        db.query(SyncSessionModel).filter(SyncSessionModel.repository_id == repo.id).delete()
+        logger.info("  Deleting sync sessions for repo %d", repo.id)
+        db.query(SyncSessionModel).filter(SyncSessionModel.repository_id == repo.id).delete(synchronize_session=False)
+        logger.info("  Sync sessions deleted")
 
         # Удаляем репозиторий
+        logger.info("  Deleting repository %d", repo.id)
         repo_repo.delete(repo.id)
+        logger.info("  Repository deleted")
+
+        # Коммитим изменения после каждого репозитория
+        db.commit()
+        logger.info("  Changes committed for repo %d", repo.id)
 
     # 3. Удаляем team_members
-    db.query(TeamMemberModel).filter(TeamMemberModel.team_id == team_id).delete()
+    logger.info("Step 3: Deleting team members for team %d", team_id)
+    db.query(TeamMemberModel).filter(TeamMemberModel.team_id == team_id).delete(synchronize_session=False)
+    logger.info("Team members deleted")
 
     # 4. Удаляем саму команду
-    db.commit()
+    logger.info("Step 4: Deleting team %d", team_id)
     team_repo.delete(team_id)
+    logger.info("Team deleted, committing changes")
+    db.commit()
 
-    logger.info("Team %d deleted by user %d", team_id, current_user.id)
+    logger.info("✅ Team %d successfully deleted by user %d", team_id, current_user.id)
