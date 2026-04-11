@@ -624,6 +624,23 @@ def sync_team_repos(
         )
     })
 
+    # Получаем длительность спринта из настроек организации
+    # Команда -> Проект -> Организация
+    proj_repo = ProjectRepository(db)
+    project = proj_repo.get_by_id(team.project_id)
+    if not project:
+        logger.warning("[team:sync_team_repos] Project %d not found for team %d", team.project_id, team_id)
+        sprint_days = DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"]
+    else:
+        org_repo = OrganizationRepository(db)
+        organization = org_repo.get_by_id(project.organization_id)
+        if not organization or not organization.sprint_length_days:
+            logger.warning("[team:sync_team_repos] Organization not found or sprint_length not set, using default: %d days", DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"])
+            sprint_days = DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"]
+        else:
+            sprint_days = organization.sprint_length_days
+            logger.info("[team:sync_team_repos] Using sprint duration from organization: %d days", sprint_days)
+
     session_ids = []
 
     # Создаем sync session для каждого репо и запускаем в фоновом потоке
@@ -648,6 +665,7 @@ def sync_team_repos(
                 repo.id,
                 github_token,
                 settings,
+                sprint_days,  # Передаем sprint_days из настроек команды
             ),
             daemon=True,
             name=f"sync-{sync_session.id}"
@@ -674,6 +692,7 @@ def _sync_repository_background(
     db_repo_id: int,
     token: str,
     settings: str,
+    sprint_days: int = 14,
 ):
     """
     Фоновая задача синхронизации репозитория.
@@ -686,6 +705,7 @@ def _sync_repository_background(
         db_repo_id: ID репозитория в БД
         token: GitHub токен
         settings: JSON строка с настройками анализа
+        sprint_days: Количество дней для спринта (из настроек команды)
     """
     logger.info("[team:_sync_repository_background] Background sync started for session %d: %s/%s",
                session_id, owner, repo)
@@ -729,22 +749,23 @@ def _sync_repository_background(
                                  session_id, e)
 
             # Запускаем оркестратор
-            logger.info("[team:_sync_repository_background] Initializing orchestrator (max_workers=5, sprint_days=14)")
+            logger.info("[team:_sync_repository_background] Initializing orchestrator (max_workers=5, sprint_days=%d)", sprint_days)
             orchestrator = SyncOrchestrator(
                 rate_limiter=_global_rate_limiter,
                 max_workers=5,
                 progress_callback=progress_callback
             )
 
-            logger.info("[team:_sync_repository_background] Starting orchestrator.sync_repository()")
+            logger.info("[team:_sync_repository_background] Starting orchestrator.sync_repository() (sprint_only=False, sprint_days=%d)", sprint_days)
             result = orchestrator.sync_repository(
                 owner=owner,
                 repo=repo,
                 token=token,
                 settings=settings,
                 db_repo_id=db_repo_id,
-                sprint_days=14,
-                session_id=session_id
+                sprint_days=sprint_days,  # Используем значение из настроек команды
+                session_id=session_id,
+                sprint_only=False  # Загружаем все коммиты включая архивные
             )
 
             # Финализация
@@ -791,6 +812,236 @@ def _sync_repository_background(
             except Exception as db_error:
                 logger.error("[team:_sync_repository_background] ✗ Failed to update failed status for session %d: %s",
                            session_id, db_error)
+@router.post("/{team_id}/sync-archive")
+def sync_team_archive(
+    team_id: int,
+    current_user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Запускает синхронизацию архивных коммитов (старше 14 дней) для всех репозиториев команды.
+    Используется для продолжения синхронизации после начальной загрузки sprint коммитов.
+    """
+    logger.info("[team:sync_team_archive] Archive sync request for team_id=%d from user_id=%d", team_id, current_user.id)
+
+    team_repo = TeamRepository(db)
+    team = team_repo.get_by_id(team_id)
+    if not team:
+        logger.warning("[team:sync_team_archive] Team %d not found", team_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    user_repo = UserRepository(db)
+    github_token = user_repo.get_github_token(current_user)
+    if not github_token:
+        logger.warning("[team:sync_team_archive] No GitHub token for user %d", current_user.id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GitHub token not configured. Go to Settings → VCS Tokens.",
+        )
+
+    repo_repo = RepositoryRepository(db)
+    repos = repo_repo.get_by_team(team_id)
+    if not repos:
+        logger.warning("[team:sync_team_archive] No repositories linked to team %d", team_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No repositories linked to this team.",
+        )
+
+    logger.info("[team:sync_team_archive] Found %d repositories for team %d", len(repos), team_id)
+
+    # Проверяем активные синхронизации
+    sync_repo = SyncSessionRepository(db)
+    active_sessions = sync_repo.get_active_by_team(team_id)
+    if len(active_sessions) >= 3:
+        logger.warning("[team:sync_team_archive] Too many active sessions for team %d: %d", team_id, len(active_sessions))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many active sync sessions ({len(active_sessions)}). Please wait for current syncs to complete.",
+        )
+
+    stored_analysis = json.loads(team.analysis_config or "{}")
+    settings = json.dumps({
+        "commit_rules": stored_analysis.get(
+            "commit_rules",
+            DEFAULT_ANALYSIS_CONFIG["commit_rules"]
+        )
+    })
+
+    # Получаем длительность спринта из настроек организации
+    # Команда -> Проект -> Организация
+    proj_repo = ProjectRepository(db)
+    project = proj_repo.get_by_id(team.project_id)
+    if not project:
+        logger.warning("[team:sync_team_archive] Project %d not found for team %d", team.project_id, team_id)
+        sprint_days = DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"]
+    else:
+        org_repo = OrganizationRepository(db)
+        organization = org_repo.get_by_id(project.organization_id)
+        if not organization or not organization.sprint_length_days:
+            logger.warning("[team:sync_team_archive] Organization not found or sprint_length not set, using default: %d days", DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"])
+            sprint_days = DEFAULT_WORKFLOW_CONFIG["sprint"]["duration_days"]
+        else:
+            sprint_days = organization.sprint_length_days
+            logger.info("[team:sync_team_archive] Using sprint duration from organization: %d days", sprint_days)
+
+    session_ids = []
+
+    # Создаем sync session для каждого репо и запускаем в фоновом потоке
+    for repo in repos:
+        logger.info("[team:sync_team_archive] Creating archive sync session for repo %s/%s (id=%d)",
+                   repo.owner, repo.name, repo.id)
+        sync_session = sync_repo.create_session(
+            team_id=team_id,
+            repository_id=repo.id
+        )
+        session_ids.append(sync_session.id)
+        logger.debug("[team:sync_team_archive] Created sync session id=%d for repo %d", sync_session.id, repo.id)
+
+        # Запускаем синхронизацию в отдельном потоке с sprint_only=False
+        logger.info("[team:sync_team_archive] Starting background thread for archive session %d", sync_session.id)
+        thread = threading.Thread(
+            target=_sync_repository_archive_background,
+            args=(
+                sync_session.id,
+                repo.owner,
+                repo.name,
+                repo.id,
+                github_token,
+                settings,
+                sprint_days,  # Передаем sprint_days из настроек команды
+            ),
+            daemon=True,
+            name=f"sync-archive-{sync_session.id}"
+        )
+        thread.start()
+        logger.debug("[team:sync_team_archive] Background thread started: %s", thread.name)
+
+    logger.info(
+        "[team:sync_team_archive] ✓ Started archive sync for team %d: %d repositories, session_ids=%s",
+        team_id, len(repos), session_ids
+    )
+
+    return {
+        "session_ids": session_ids,
+        "message": f"Archive synchronization started for {len(repos)} repositories",
+        "repositories": [{"id": r.id, "name": r.name, "owner": r.owner} for r in repos],
+    }
+
+
+def _sync_repository_archive_background(
+    session_id: int,
+    owner: str,
+    repo: str,
+    db_repo_id: int,
+    token: str,
+    settings: str,
+    sprint_days: int = 14,
+):
+    """
+    Фоновая задача синхронизации архивных коммитов (старше sprint_days дней).
+    Аналог _sync_repository_background, но с sprint_only=False.
+
+    Args:
+        session_id: ID сессии синхронизации
+        owner: Владелец репозитория
+        repo: Название репозитория
+        db_repo_id: ID репозитория в БД
+        token: GitHub токен
+        settings: JSON строка с настройками анализа
+        sprint_days: Количество дней для спринта (из настроек команды)
+    """
+    logger.info("[team:_sync_repository_archive_background] Archive sync started for session %d: %s/%s",
+               session_id, owner, repo)
+
+    from src.adapters.db.base import SessionLocal
+
+    with SessionLocal() as db:
+        sync_repo = SyncSessionRepository(db)
+
+        try:
+            sync_session = sync_repo.get_by_id(session_id)
+            if not sync_session:
+                logger.error("[team:_sync_repository_archive_background] ✗ Sync session %d not found", session_id)
+                return
+
+            logger.info("[team:_sync_repository_archive_background] Updating session %d status to running", session_id)
+            sync_session.status = SyncStatus.running
+            sync_session.started_at = datetime.now(timezone.utc)
+            sync_session.current_phase = "processing_archive"
+            db.commit()
+
+            logger.info("[team:_sync_repository_archive_background] Starting orchestrator for archive session %d: %s/%s",
+                       session_id, owner, repo)
+
+            def progress_callback(progress):
+                try:
+                    logger.debug("[team:_sync_repository_archive_background:progress_callback] Updating progress for session %d: %d/%d commits, phase=%s",
+                               session_id, progress.processed_commits, progress.total_commits, progress.current_phase)
+                    sync_repo.update_progress(
+                        session_id=session_id,
+                        total_commits=progress.total_commits,
+                        processed_commits=progress.processed_commits,
+                        current_phase=progress.current_phase,
+                        sprint_commits_done=True,  # Archive sync предполагает что sprint уже загружен
+                    )
+                except Exception as e:
+                    logger.warning("[team:_sync_repository_archive_background:progress_callback] ⚠ Failed to update progress: %s", e)
+
+            orchestrator = SyncOrchestrator(
+                rate_limiter=_global_rate_limiter,
+                max_workers=5,
+                progress_callback=progress_callback
+            )
+
+            logger.info("[team:_sync_repository_archive_background] Starting orchestrator with sprint_only=False, sprint_days=%d", sprint_days)
+            result = orchestrator.sync_repository(
+                owner=owner,
+                repo=repo,
+                token=token,
+                settings=settings,
+                db_repo_id=db_repo_id,
+                sprint_days=sprint_days,  # Используем значение из настроек команды
+                session_id=session_id,
+                sprint_only=False  # Загружаем ВСЕ коммиты включая archive
+            )
+
+            # Финализация
+            sync_session = sync_repo.get_by_id(session_id)
+            if not result.get("cancelled"):
+                logger.info("[team:_sync_repository_archive_background] Marking session %d as completed", session_id)
+                sync_session.status = SyncStatus.completed
+                sync_session.completed_at = datetime.now(timezone.utc)
+
+            sync_session.result = result
+            sync_session.new_commits = result.get("new_commits", 0)
+            if result.get("errors"):
+                logger.warning("[team:_sync_repository_archive_background] Session %d completed with %d errors",
+                             session_id, len(result["errors"]))
+                sync_session.errors = {"errors": result["errors"]}
+            db.commit()
+
+            if result.get("cancelled"):
+                logger.info("[team:_sync_repository_archive_background] ⚠ Archive sync for session %d was cancelled", session_id)
+            else:
+                logger.info(
+                    "[team:_sync_repository_archive_background] ✓ Completed archive sync for session %d: %d new commits",
+                    session_id, result.get("new_commits", 0)
+                )
+
+        except Exception as e:
+            logger.error("[team:_sync_repository_archive_background] ✗ Archive sync failed for session %d: %s",
+                       session_id, e, exc_info=True)
+
+            try:
+                sync_session = sync_repo.get_by_id(session_id)
+                if sync_session:
+                    sync_session.status = SyncStatus.failed
+                    sync_session.completed_at = datetime.now(timezone.utc)
+                    sync_session.errors = {"errors": [str(e)]}
+                    db.commit()
+            except Exception as db_error:
+                logger.error("[team:_sync_repository_archive_background] ✗ Failed to update failed status: %s", db_error)
 
 
 # ───────────────────────── Delete ─────────────────────────

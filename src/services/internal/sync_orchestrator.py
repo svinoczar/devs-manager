@@ -76,7 +76,8 @@ class SyncOrchestrator:
         settings: str,
         db_repo_id: int,
         sprint_days: int = 14,
-        session_id: int | None = None
+        session_id: int | None = None,
+        sprint_only: bool = True
     ) -> dict:
         """
         Синхронизирует репозиторий с приоритетной потоковой загрузкой.
@@ -86,7 +87,7 @@ class SyncOrchestrator:
         2. Каждую страницу сразу разделяем на sprint/archive
         3. Sprint коммиты обрабатываем немедленно
         4. Когда вышли за пределы sprint_cutoff - отмечаем sprint_commits_done
-        5. Продолжаем обработку archive коммитов в фоне
+        5. Если sprint_only=True - останавливаемся, иначе продолжаем обработку archive
 
         Args:
             owner: Владелец репозитория
@@ -95,6 +96,7 @@ class SyncOrchestrator:
             settings: JSON строка с настройками анализа
             db_repo_id: ID репозитория в БД
             sprint_days: Количество дней для спринта (приоритетная загрузка)
+            sprint_only: Если True, загружаем только sprint коммиты (по умолчанию)
 
         Returns:
             dict с результатами синхронизации
@@ -223,16 +225,22 @@ class SyncOrchestrator:
                     logger.debug("[sync_orchestrator:sync_repository] Sprint batch processed: %d new, %d skipped",
                                result["new"], result["skipped"])
 
-                # Обрабатываем archive батч (если sprint уже завершен)
+                # Обрабатываем archive батч (только если не sprint_only)
                 if archive_batch and not in_sprint_zone:
-                    logger.info("[sync_orchestrator:sync_repository] Processing %d archive commits from page %d (workers=%d)",
-                              len(archive_batch), page_num, self.max_workers)
-                    result = self._process_commits_parallel(
-                        archive_batch, owner, repo, token, settings, db_repo_id, db_contributors
-                    )
-                    archive_new += result["new"]
-                    logger.debug("[sync_orchestrator:sync_repository] Archive batch processed: %d new, %d skipped",
-                               result["new"], result["skipped"])
+                    if sprint_only:
+                        # Останавливаем пагинацию - sprint завершен, archive не нужен
+                        logger.info("[sync_orchestrator:sync_repository] Sprint completed, stopping pagination (sprint_only=True). Archive commits available: %d on current page",
+                                  len(archive_batch))
+                        break
+                    else:
+                        logger.info("[sync_orchestrator:sync_repository] Processing %d archive commits from page %d (workers=%d)",
+                                  len(archive_batch), page_num, self.max_workers)
+                        result = self._process_commits_parallel(
+                            archive_batch, owner, repo, token, settings, db_repo_id, db_contributors
+                        )
+                        archive_new += result["new"]
+                        logger.debug("[sync_orchestrator:sync_repository] Archive batch processed: %d new, %d skipped",
+                                   result["new"], result["skipped"])
 
         except SyncCancelledException as e:
             logger.info("[sync_orchestrator:sync_repository] ✗ Sync was cancelled: %s", e)

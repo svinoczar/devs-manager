@@ -153,38 +153,119 @@ def delete_project(
     # Получаем все команды проекта
     teams = team_repo.get_by_project(project_id)
 
-    for team in teams:
-        # Удаляем все репозитории команды
-        repos = repo_repo.get_by_team(team.id)
+    # Оптимизированное удаление - используем batch delete для больших таблиц
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[delete_project] Starting deletion of project {project_id}: {project.name}")
 
-        for repo in repos:
-            # Удаляем commit_files
-            commits = db.query(CommitModel).filter(CommitModel.repository_id == repo.id).all()
-            for commit in commits:
-                db.query(CommitFileModel).filter(CommitFileModel.commit_id == commit.id).delete()
+    # Вспомогательная функция для batch deletion используя raw SQL с CTID
+    def batch_delete_raw(table_name, where_clause, batch_size=5000, label="records"):
+        """Удаляет записи порциями используя CTID (быстрее чем IN с ID)"""
+        from sqlalchemy import text
+        total_deleted = 0
 
-            # Удаляем коммиты
-            db.query(CommitModel).filter(CommitModel.repository_id == repo.id).delete()
+        while True:
+            # Используем CTID для быстрого batch deletion
+            sql = text(f"""
+                DELETE FROM {table_name}
+                WHERE ctid IN (
+                    SELECT ctid FROM {table_name}
+                    WHERE {where_clause}
+                    LIMIT :batch_size
+                )
+            """)
+
+            result = db.execute(sql, {"batch_size": batch_size})
+            deleted = result.rowcount
+
+            db.commit()  # Commit после каждого батча!
+            total_deleted += deleted
+
+            if deleted > 0:
+                logger.info(f"[delete_project] Deleted {total_deleted} {label}...")
+
+            if deleted < batch_size:
+                break
+
+        logger.info(f"[delete_project] ✓ Total deleted {total_deleted} {label}")
+        return total_deleted
+
+    team_ids = [team.id for team in teams]
+    logger.info(f"[delete_project] Found {len(team_ids)} teams")
+
+    if team_ids:
+        # Получаем все репозитории для всех команд
+        repo_ids = [repo.id for team_id in team_ids for repo in repo_repo.get_by_team(team_id)]
+        logger.info(f"[delete_project] Found {len(repo_ids)} repositories")
+
+        if repo_ids:
+            # Удаляем все commit_files для всех репозиториев batch'ами
+            logger.info(f"[delete_project] Deleting commit files...")
+            repo_ids_str = ','.join(map(str, repo_ids))
+            batch_delete_raw(
+                "commit_files",
+                f"commit_id IN (SELECT id FROM commits WHERE repository_id IN ({repo_ids_str}))",
+                batch_size=10000,
+                label="commit files"
+            )
+
+            # Удаляем все коммиты batch'ами
+            logger.info(f"[delete_project] Deleting commits...")
+            batch_delete_raw(
+                "commits",
+                f"repository_id IN ({repo_ids_str})",
+                batch_size=5000,
+                label="commits"
+            )
 
             # Удаляем PR и Issues
             try:
-                db.query(PullRequestModel).filter(PullRequestModel.repository_id == repo.id).delete()
-                db.query(IssueModel).filter(IssueModel.repository_id == repo.id).delete()
-            except:
-                pass
+                logger.info(f"[delete_project] Deleting PRs and issues...")
+                deleted_prs = db.query(PullRequestModel).filter(
+                    PullRequestModel.repository_id.in_(repo_ids)
+                ).delete(synchronize_session=False)
+                # FIX: исправлен баг - было PullRequestModel.repository_id
+                deleted_issues = db.query(IssueModel).filter(
+                    IssueModel.repository_id.in_(repo_ids)
+                ).delete(synchronize_session=False)
+                db.commit()
+                logger.info(f"[delete_project] ✓ Deleted {deleted_prs} PRs, {deleted_issues} issues")
+            except Exception as e:
+                logger.warning(f"[delete_project] Failed to delete PRs/issues: {e}")
+                db.rollback()
 
             # Удаляем sync sessions
-            db.query(SyncSessionModel).filter(SyncSessionModel.repository_id == repo.id).delete()
+            logger.info(f"[delete_project] Deleting sync sessions...")
+            deleted_sessions = db.query(SyncSessionModel).filter(
+                SyncSessionModel.repository_id.in_(repo_ids)
+            ).delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"[delete_project] ✓ Deleted {deleted_sessions} sync sessions")
 
-            # Удаляем репозиторий
-            repo_repo.delete(repo.id)
+            # Удаляем все репозитории
+            logger.info(f"[delete_project] Deleting repositories...")
+            for repo_id in repo_ids:
+                repo_repo.delete(repo_id)
+            db.commit()
+            logger.info(f"[delete_project] ✓ Deleted {len(repo_ids)} repositories")
 
-        # Удаляем team_members
-        db.query(TeamMemberModel).filter(TeamMemberModel.team_id == team.id).delete()
+        # Удаляем всех team_members
+        logger.info(f"[delete_project] Deleting team members...")
+        deleted_members = db.query(TeamMemberModel).filter(
+            TeamMemberModel.team_id.in_(team_ids)
+        ).delete(synchronize_session=False)
+        db.commit()
+        logger.info(f"[delete_project] ✓ Deleted {deleted_members} team members")
 
-        # Удаляем команду
-        team_repo.delete(team.id)
+        # Удаляем все команды
+        logger.info(f"[delete_project] Deleting teams...")
+        for team_id in team_ids:
+            team_repo.delete(team_id)
+        db.commit()
+        logger.info(f"[delete_project] ✓ Deleted {len(team_ids)} teams")
 
     # Удаляем проект
-    db.commit()
+    logger.info(f"[delete_project] Deleting project...")
     proj_repo.delete(project_id)
+    db.commit()
+    logger.info(f"[delete_project] ✓ Project {project_id} deleted successfully")

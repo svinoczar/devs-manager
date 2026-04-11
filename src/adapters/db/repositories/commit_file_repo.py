@@ -14,6 +14,15 @@ class CommitFileRepository(BaseRepository[CommitFileModel]):
         )
         return list(self.db.scalars(stmt).all())
 
+    def get_by_commit_ids(self, commit_ids: list[int]) -> list[CommitFileModel]:
+        """Получает все файлы для списка коммитов"""
+        if not commit_ids:
+            return []
+        stmt = select(CommitFileModel).where(
+            CommitFileModel.commit_id.in_(commit_ids)
+        )
+        return list(self.db.scalars(stmt).all())
+
     def get_by_commit_and_path(
         self, 
         commit_id: int, 
