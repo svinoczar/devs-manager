@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import Any
 
@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from src.api.dependencies import get_db, get_current_user
 from src.adapters.db.models.user import UserModel
-from src.adapters.db.models.commit_file import CommitFileModel
 from src.adapters.db.repositories.team_repo import TeamRepository
 from src.adapters.db.repositories.commit_repo import CommitRepository
 from src.adapters.db.repositories.commit_file_repo import CommitFileRepository
@@ -18,13 +17,91 @@ from src.adapters.db.repositories.issue_repo import IssueRepository
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
-# Типы коммитов, считающихся "функциональными"
 FUNCTIONAL_TYPES = {"feat", "fix", "perf", "refactor"}
 FEATURE_TYPES = {"feat", "perf", "refactor"}
 BUG_TYPES = {"fix"}
 
 DEFAULT_SPRINT_DAYS = 14
 DEFAULT_SIGNIFICANT_MIN_LINES = 5
+
+DOC_FILE_PATTERNS = ['.md', 'README', 'CHANGELOG', 'CONTRIBUTING', 'LICENSE', '.rst', '.adoc']
+TEST_FILE_PATTERNS = ['.test.', '.spec.', 'test_', '_test.', '__tests__/', '/tests/', '/test/', 'spec/']
+
+# Comment line prefixes per language for documentation ratio calculation
+COMMENT_PREFIXES_BY_LANG: dict[str, list[str]] = {
+    "Python":     ["#", '"""', "'''", "##"],
+    "JavaScript": ["//", "/*", "*/", " *", "/**"],
+    "TypeScript": ["//", "/*", "*/", " *", "/**"],
+    "Java":       ["//", "/*", "*/", " *", "/**"],
+    "Go":         ["//", "/*", "*/", " *"],
+    "Rust":       ["//", "///", "/*", "*/", " *"],
+    "C":          ["//", "/*", "*/", " *"],
+    "C++":        ["//", "/*", "*/", " *"],
+    "Ruby":       ["#"],
+    "Shell":      ["#"],
+    "SQL":        ["--", "/*", "*/"],
+    "HTML":       ["<!--", "-->", "!--"],
+    "CSS":        ["/*", "*/", " *"],
+    "SCSS":       ["//", "/*", "*/", " *"],
+    "PHP":        ["//", "#", "/*", "*/", " *"],
+    "Swift":      ["//", "/*", "*/", " *", "///"],
+    "Kotlin":     ["//", "/*", "*/", " *"],
+    "Scala":      ["//", "/*", "*/", " *"],
+    "R":          ["#"],
+    "Markdown":   [],  # Markdown files are themselves documentation — count all lines
+}
+
+# Default prefixes for unknown languages
+DEFAULT_COMMENT_PREFIXES = ["//", "#", "/*", "*/", " *", '"""', "'''", "--", "<!--"]
+
+
+def _is_doc_file(file_path: str) -> bool:
+    file_path_lower = file_path.lower()
+    return any(pattern.lower() in file_path_lower for pattern in DOC_FILE_PATTERNS)
+
+
+def _is_test_file(file_path: str) -> bool:
+    file_path_lower = file_path.lower()
+    return any(pattern.lower() in file_path_lower for pattern in TEST_FILE_PATTERNS)
+
+
+def _is_comment_line(line: str, language: str | None) -> bool:
+    """
+    Check if a source code line (stripped of leading '+') is a comment or docstring.
+    Multi-line comment markers (/* */) and docstring openers count as comment lines.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    # Markdown/doc files — every line counts as documentation
+    if language == "Markdown":
+        return True
+
+    prefixes = COMMENT_PREFIXES_BY_LANG.get(language or "", DEFAULT_COMMENT_PREFIXES)
+    return any(stripped.startswith(p) for p in prefixes)
+
+
+def _extract_added_lines(patch: str) -> set[str]:
+    """Extract content of added lines from a git diff patch."""
+    lines = set()
+    for raw in (patch or "").split("\n"):
+        if raw.startswith("+") and not raw.startswith("+++"):
+            content = raw[1:].strip()
+            if content:
+                lines.add(content)
+    return lines
+
+
+def _extract_deleted_lines(patch: str) -> set[str]:
+    """Extract content of deleted/replaced lines from a git diff patch."""
+    lines = set()
+    for raw in (patch or "").split("\n"):
+        if raw.startswith("-") and not raw.startswith("---"):
+            content = raw[1:].strip()
+            if content:
+                lines.add(content)
+    return lines
 
 
 def _get_workflow_config(team) -> dict:
@@ -41,16 +118,37 @@ def _get_metrics_config(team) -> dict:
         return {}
 
 
+def _get_analysis_config(team) -> dict:
+    try:
+        return json.loads(team.analysis_config) if team.analysis_config else {}
+    except Exception:
+        return {}
+
+
 def _calc_dqi(
     commits_by_type: dict[str, int],
     total_commits: int,
     total_additions: int,
     significant_commits: int,
+    reversion_ratio: float = 0.0,
+    breaking_ratio: float = 0.0,
+    doc_ratio: float = 0.0,
+    test_ratio: float = 0.0,
+    sprint_stability: float = 100.0,
 ) -> float:
     """
     Developer Quality Index (0–100).
 
-    DQI = functional_ratio * 0.5 + (1 - bug_rate) * 0.3 + significant_ratio * 0.2
+    Weights:
+    - 25% — functional commits (feat/perf/refactor)
+    - 10% — bug fixes
+    - 15% — significant changes
+    - 15% — reversion stability
+    - 15% — code stability (sprint)
+    - 5%  — no breaking changes
+    - 7%  — test coverage
+    - 5%  — documentation
+    - 3%  — base bonus
     """
     if total_commits == 0:
         return 0.0
@@ -58,18 +156,147 @@ def _calc_dqi(
     feat_count = sum(commits_by_type.get(t, 0) for t in FEATURE_TYPES)
     fix_count = commits_by_type.get("fix", 0)
 
-    # Functional ratio: share of feature/perf/refactor commits
     functional_ratio = feat_count / total_commits
 
-    # Bug rate: share of fix commits relative to feat+fix
     denominator = feat_count + fix_count
     bug_rate = fix_count / denominator if denominator > 0 else 0.0
 
-    # Significant commits ratio
     significant_ratio = significant_commits / total_commits
 
-    dqi = (functional_ratio * 0.5 + (1 - bug_rate) * 0.3 + significant_ratio * 0.2) * 100
+    reversion_stability = max(0.0, 1.0 - reversion_ratio / 100)
+    breaking_stability = max(0.0, 1.0 - breaking_ratio / 100)
+
+    # Code stability: sprint_stability is already 0-100
+    code_stability = sprint_stability / 100.0
+
+    # Documentation (normalise: 15% doc_ratio = 100%)
+    doc_score = min(doc_ratio / 15, 1.0)
+
+    # Test coverage (normalise: 25% test_ratio = 100%)
+    test_score = min(test_ratio / 25, 1.0)
+
+    dqi = (
+        functional_ratio  * 25
+        + bug_rate         * 10
+        + significant_ratio * 15
+        + reversion_stability * 15
+        + code_stability   * 15
+        + breaking_stability * 5
+        + test_score       * 7
+        + doc_score        * 5
+        + 3  # base bonus
+    )
+
     return round(min(dqi, 100.0), 1)
+
+
+def _compute_stability_metrics(
+    contributor_commits: list,
+    all_commits_sorted: list,
+    files_by_commit: dict[int, list],
+    sprint_days: int,
+) -> dict:
+    """
+    Compute per-contributor code stability.
+
+    Approach:
+    - For each line added by a contributor's commit at time T, check whether
+      that same line content appears in the deleted-lines of any later commit
+      (by any author) within the same sprint.
+    - weekly_stability:  % of added lines NOT churned within 7 days of addition
+    - sprint_stability:  % of added lines NOT churned before sprint end
+
+    Returns dict with keys: weekly_stability, sprint_stability (both 0-100).
+    """
+    if not contributor_commits or not all_commits_sorted:
+        return {"weekly_stability": 100.0, "sprint_stability": 100.0}
+
+    # Build per-file timeline of deletions: file_path → list of (date, deleted_set)
+    file_deletions: dict[str, list[tuple]] = defaultdict(list)
+    for commit in all_commits_sorted:
+        for f in files_by_commit.get(commit.id, []):
+            if f.patch:
+                deleted = _extract_deleted_lines(f.patch)
+                if deleted:
+                    file_deletions[f.file_path].append((commit.authored_at, deleted))
+
+    total_added = 0
+    churned_week = 0
+    churned_sprint = 0
+
+    for commit in contributor_commits:
+        commit_date = commit.authored_at
+        if not commit_date:
+            continue
+
+        for f in files_by_commit.get(commit.id, []):
+            if not f.patch:
+                continue
+            added = _extract_added_lines(f.patch)
+            if not added:
+                continue
+
+            week_deleted: set[str] = set()
+            sprint_deleted: set[str] = set()
+
+            for del_date, deleted_set in file_deletions.get(f.file_path, []):
+                if del_date is None or del_date <= commit_date:
+                    continue  # Only look at future changes
+                days_later = (del_date - commit_date).total_seconds() / 86400.0
+                intersect = added & deleted_set
+                if not intersect:
+                    continue
+                if days_later <= 7:
+                    week_deleted |= intersect
+                sprint_deleted |= intersect
+
+            n = len(added)
+            total_added += n
+            churned_week += len(week_deleted)
+            churned_sprint += len(sprint_deleted)
+
+    if total_added == 0:
+        return {"weekly_stability": 100.0, "sprint_stability": 100.0}
+
+    weekly_stability = round((total_added - churned_week) / total_added * 100, 1)
+    sprint_stability = round((total_added - churned_sprint) / total_added * 100, 1)
+    return {"weekly_stability": weekly_stability, "sprint_stability": sprint_stability}
+
+
+def _compute_comment_ratio(
+    contributor_commits: list,
+    files_by_commit: dict[int, list],
+) -> float:
+    """
+    Compute percentage of added code lines that are comments or documentation.
+
+    Counts:
+    - Single-line comments (// # -- etc.)
+    - Multi-line comment markers (/* */ etc.)
+    - Docstring openers/closers (\"\"\" ''' etc.)
+    - Entire markdown/rst files
+
+    Returns comment_ratio as percentage (0-100).
+    """
+    total_added = 0
+    comment_added = 0
+
+    for commit in contributor_commits:
+        for f in files_by_commit.get(commit.id, []):
+            if not f.patch:
+                continue
+            lang = f.language
+            for raw in f.patch.split("\n"):
+                if not raw.startswith("+") or raw.startswith("+++"):
+                    continue
+                total_added += 1
+                content = raw[1:]  # strip leading +
+                if _is_comment_line(content, lang):
+                    comment_added += 1
+
+    if total_added == 0:
+        return 0.0
+    return round(comment_added / total_added * 100, 1)
 
 
 @router.get("/team/{team_id}/sprint-stats")
@@ -84,27 +311,27 @@ def get_sprint_stats(
     if not team:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
 
-    # --- Sprint duration ---
     workflow = _get_workflow_config(team)
     metrics = _get_metrics_config(team)
+    analysis = _get_analysis_config(team)
+
+    special_commits = analysis.get("special_commits", {})
+    bot_logins = set(special_commits.get("bot_logins", []))
 
     sprint_cfg = workflow.get("sprint", {})
     default_sprint_days = sprint_cfg.get("duration_days", DEFAULT_SPRINT_DAYS)
 
-    # Поддержка days=all (последние 5000 коммитов)
     is_all_time = False
     commit_limit = None
 
     if days == "all":
         is_all_time = True
         commit_limit = 5000
-        sprint_days = 9999  # Большое число для извлечения всех коммитов
+        sprint_days = 9999
     else:
         sprint_days = int(days) if days else default_sprint_days
 
-    significant_min_lines = (
-        metrics.get("significant_commit_min_lines", DEFAULT_SIGNIFICANT_MIN_LINES)
-    )
+    significant_min_lines = metrics.get("significant_commit_min_lines", DEFAULT_SIGNIFICANT_MIN_LINES)
     commit_weights: dict[str, float] = metrics.get("commit_weights", {
         "feat": 3.0, "fix": 2.0, "perf": 2.5, "refactor": 2.0,
         "test": 1.5, "docs": 0.5, "style": 0.5, "chore": 0.5, "revert": 0.0,
@@ -113,12 +340,10 @@ def get_sprint_stats(
     until_dt = datetime.now(timezone.utc)
 
     if is_all_time:
-        # Для "all" берем очень старую дату
         since_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
     else:
         since_dt = until_dt - timedelta(days=sprint_days)
 
-    # --- Fetch data ---
     commit_repo = CommitRepository(db)
     pr_repo = PullRequestRepository(db)
     issue_repo = IssueRepository(db)
@@ -126,13 +351,11 @@ def get_sprint_stats(
 
     commits = commit_repo.get_by_team_date_range(team_id, since_dt, until_dt)
 
-    # Применяем лимит для all-time режима
     limited = False
     if commit_limit and len(commits) > commit_limit:
         commits = sorted(commits, key=lambda c: c.authored_at or datetime.min, reverse=True)[:commit_limit]
         limited = True
 
-    # Пересчитываем реальный период после применения лимита
     if commits:
         actual_since = min(c.authored_at for c in commits if c.authored_at)
         actual_until = max(c.authored_at for c in commits if c.authored_at)
@@ -143,7 +366,6 @@ def get_sprint_stats(
     prs = pr_repo.get_by_team_date_range(team_id, actual_since, actual_until)
     issues = issue_repo.get_by_team_date_range(team_id, actual_since, actual_until)
 
-    # --- Contributor lookup ---
     contributor_cache: dict[int, dict] = {}
     for c in contributor_repo.get_all(limit=10000):
         contributor_cache[c.id] = {
@@ -151,42 +373,47 @@ def get_sprint_stats(
             "avatar_url": c.profile_url,
         }
 
+    # --- Load all commit files upfront (for stability + comment metrics) ---
+    commit_file_repo = CommitFileRepository(db)
+    commit_ids = [c.id for c in commits]
+    files_by_commit: dict[int, list] = defaultdict(list)
+
+    if commit_ids:
+        for i in range(0, len(commit_ids), 1000):
+            batch_ids = commit_ids[i:i + 1000]
+            files = commit_file_repo.get_by_commit_ids(batch_ids)
+            for f in files:
+                files_by_commit[f.commit_id].append(f)
+
+    # Sorted commits for stability computation
+    all_commits_sorted = sorted(
+        [c for c in commits if c.authored_at],
+        key=lambda c: c.authored_at,
+    )
+
     # --- Build daily buckets ---
     daily: dict[str, dict] = {}
 
     if is_all_time:
-        # Для all-time строим buckets на основе реальных дат коммитов
         if commits:
             actual_days = (actual_until.date() - actual_since.date()).days + 1
-            for i in range(min(actual_days, 365)):  # Макс 365 дней для графиков
+            for i in range(min(actual_days, 365)):
                 day = (actual_since + timedelta(days=i)).date()
                 daily[str(day)] = {
-                    "date": str(day),
-                    "commit_count": 0,
-                    "additions": 0,
-                    "deletions": 0,
-                    "pr_count": 0,
-                    "issue_count": 0,
-                    "commits": [],
-                    "pull_requests": [],
-                    "issues": [],
+                    "date": str(day), "commit_count": 0, "additions": 0,
+                    "deletions": 0, "pr_count": 0, "issue_count": 0,
+                    "commits": [], "pull_requests": [], "issues": [],
                 }
     else:
         for i in range(sprint_days):
             day = (since_dt + timedelta(days=i)).date()
             daily[str(day)] = {
-                "date": str(day),
-                "commit_count": 0,
-                "additions": 0,
-                "deletions": 0,
-                "pr_count": 0,
-                "issue_count": 0,
-                "commits": [],
-                "pull_requests": [],
-                "issues": [],
+                "date": str(day), "commit_count": 0, "additions": 0,
+                "deletions": 0, "pr_count": 0, "issue_count": 0,
+                "commits": [], "pull_requests": [], "issues": [],
             }
 
-    # --- Fill commits ---
+    # --- Contributor stats accumulators ---
     contributor_stats: dict[str, dict] = defaultdict(lambda: {
         "login": "",
         "avatar_url": None,
@@ -199,6 +426,14 @@ def get_sprint_stats(
         "prs_opened": 0,
         "prs_merged": 0,
         "issues_opened": 0,
+        "revert_commits": 0,
+        "breaking_commits": 0,
+        "doc_commits": 0,
+        "test_commits": 0,
+        "commits_with_docs": 0,
+        "commits_with_tests": 0,
+        # Per-contributor commit list (for stability + comment ratio)
+        "_commits": [],
     })
 
     for commit in commits:
@@ -212,6 +447,9 @@ def get_sprint_stats(
         contrib_info = contributor_cache.get(commit.contributor_id, {}) if commit.contributor_id else {}
         login = contrib_info.get("login") or commit.author_name or "unknown"
         avatar = contrib_info.get("avatar_url")
+
+        if login in bot_logins:
+            continue
 
         commit_type = commit.commit_type or "chore"
         additions = commit.additions or 0
@@ -232,7 +470,6 @@ def get_sprint_stats(
             "files_changed": commit.files_changed or 0,
         })
 
-        # Contributor stats
         cs = contributor_stats[login]
         cs["login"] = login
         cs["avatar_url"] = avatar
@@ -240,12 +477,42 @@ def get_sprint_stats(
         cs["commits_by_type"][commit_type] += 1
         cs["total_additions"] += additions
         cs["total_deletions"] += deletions
+        cs["_commits"].append(commit)
 
         if additions >= significant_min_lines:
             cs["significant_commits"] += 1
 
         weight = commit_weights.get(commit_type, 0.5)
         cs["weighted_score"] += additions * weight
+
+        if commit.is_revert_commit:
+            cs["revert_commits"] += 1
+        if commit.is_breaking_change:
+            cs["breaking_commits"] += 1
+        if commit_type == "docs":
+            cs["doc_commits"] += 1
+        if commit_type == "test":
+            cs["test_commits"] += 1
+
+    # --- Analyze commit files for doc/test file patterns ---
+    for commit_id, commit_files in files_by_commit.items():
+        commit = next((c for c in commits if c.id == commit_id), None)
+        if not commit or not commit.contributor_id:
+            continue
+
+        contrib_info = contributor_cache.get(commit.contributor_id, {})
+        login = contrib_info.get("login") or commit.author_name or "unknown"
+
+        if login in bot_logins or login not in contributor_stats:
+            continue
+
+        has_doc_files = any(_is_doc_file(f.file_path) for f in commit_files)
+        has_test_files = any(_is_test_file(f.file_path) for f in commit_files)
+
+        if has_doc_files:
+            contributor_stats[login]["commits_with_docs"] += 1
+        if has_test_files:
+            contributor_stats[login]["commits_with_tests"] += 1
 
     # --- Fill PRs ---
     for pr in prs:
@@ -301,16 +568,53 @@ def get_sprint_stats(
     contributors_list = []
     for login, cs in contributor_stats.items():
         commits_by_type = dict(cs["commits_by_type"])
+        total = cs["total_commits"]
+
+        reversion_ratio = (cs["revert_commits"] / total * 100) if total > 0 else 0
+        breaking_ratio = (cs["breaking_commits"] / total * 100) if total > 0 else 0
+
+        doc_ratio = ((cs["doc_commits"] + cs["commits_with_docs"]) / total * 100) if total > 0 else 0
+
+        functional_commits = (
+            sum(cs["commits_by_type"].get(t, 0) for t in FEATURE_TYPES)
+            + cs["commits_by_type"].get("fix", 0)
+        )
+        test_ratio = (
+            (cs["test_commits"] + cs["commits_with_tests"]) / functional_commits * 100
+            if functional_commits > 0 else 0
+        )
+
+        # Code stability metrics
+        contributor_commits_sorted = sorted(
+            [c for c in cs["_commits"] if c.authored_at],
+            key=lambda c: c.authored_at,
+        )
+        stability = _compute_stability_metrics(
+            contributor_commits=contributor_commits_sorted,
+            all_commits_sorted=all_commits_sorted,
+            files_by_commit=files_by_commit,
+            sprint_days=sprint_days,
+        )
+
+        # Comment/documentation ratio (% of added code lines that are comments)
+        comment_ratio = _compute_comment_ratio(contributor_commits_sorted, files_by_commit)
+
         dqi = _calc_dqi(
             commits_by_type=commits_by_type,
-            total_commits=cs["total_commits"],
+            total_commits=total,
             total_additions=cs["total_additions"],
             significant_commits=cs["significant_commits"],
+            reversion_ratio=reversion_ratio,
+            breaking_ratio=breaking_ratio,
+            doc_ratio=doc_ratio,
+            test_ratio=test_ratio,
+            sprint_stability=stability["sprint_stability"],
         )
+
         contributors_list.append({
             "login": login,
             "avatar_url": cs["avatar_url"],
-            "total_commits": cs["total_commits"],
+            "total_commits": total,
             "commits_by_type": commits_by_type,
             "total_additions": cs["total_additions"],
             "total_deletions": cs["total_deletions"],
@@ -320,12 +624,22 @@ def get_sprint_stats(
             "prs_opened": cs["prs_opened"],
             "prs_merged": cs["prs_merged"],
             "issues_opened": cs["issues_opened"],
+            "revert_commits": cs["revert_commits"],
+            "breaking_commits": cs["breaking_commits"],
+            "doc_commits": cs["doc_commits"],
+            "test_commits": cs["test_commits"],
+            "reversion_ratio": round(reversion_ratio, 1),
+            "breaking_ratio": round(breaking_ratio, 1),
+            "doc_ratio": round(doc_ratio, 1),
+            "test_ratio": round(test_ratio, 1),
+            # New metrics
+            "weekly_stability": stability["weekly_stability"],
+            "sprint_stability": stability["sprint_stability"],
+            "comment_ratio": comment_ratio,
         })
 
-    # Sort by DQI desc, take top 5 for ranking but return all
     contributors_list.sort(key=lambda x: x["quality_index"], reverse=True)
 
-    # --- Summary ---
     total_commits = sum(d["commit_count"] for d in daily.values())
     total_additions = sum(d["additions"] for d in daily.values())
     active_days = sum(1 for d in daily.values() if d["commit_count"] > 0)
@@ -412,7 +726,7 @@ def get_commit_details(
 def get_contributor_commits(
     team_id: int,
     contributor_login: str,
-    days: int | None = None,
+    days: int | str | None = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -420,54 +734,38 @@ def get_contributor_commits(
 ) -> dict[str, Any]:
     """
     Получить список коммитов конкретного разработчика с оценкой каждого.
-
-    Args:
-        team_id: ID команды
-        contributor_login: GitHub login разработчика
-        days: Количество дней для анализа (опционально, по умолчанию из конфига спринта)
-        limit: Максимальное количество коммитов
-        offset: Смещение для пагинации
-        db: Database session
-        current_user: Текущий пользователь
-
-    Returns:
-        dict с полями:
-            - contributor: информация о разработчике
-            - commits: список коммитов с quality_score
-            - total: общее количество коммитов
-            - pagination: параметры пагинации
+    Поддерживает days=all для получения всех коммитов.
     """
-    # Проверяем команду
     team_repo = TeamRepository(db)
     team = team_repo.get_by_id(team_id)
     if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Team not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
 
-    # Ищем контрибьютора по login
     contributor_repo = ContributorRepository(db)
     contributors = contributor_repo.get_by_login(contributor_login, vcs_provider="github")
 
     if not contributors:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Contributor {contributor_login} not found"
+            detail=f"Contributor {contributor_login} not found",
         )
 
-    contributor = contributors[0]  # Берем первого (обычно один)
+    contributor = contributors[0]
 
-    # Получаем конфигурацию
     workflow = _get_workflow_config(team)
     metrics = _get_metrics_config(team)
 
-    # Определяем период
-    sprint_days = days or workflow.get("sprint", {}).get("duration_days", DEFAULT_SPRINT_DAYS)
+    # Handle days=all — fetch from the beginning of time
+    is_all_time = days == "all"
     until_dt = datetime.now(timezone.utc)
-    since_dt = until_dt - timedelta(days=sprint_days)
 
-    # Получаем коммиты
+    if is_all_time:
+        since_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        sprint_days = 9999
+    else:
+        sprint_days = int(days) if days else workflow.get("sprint", {}).get("duration_days", DEFAULT_SPRINT_DAYS)
+        since_dt = until_dt - timedelta(days=sprint_days)
+
     commit_repo = CommitRepository(db)
     commits = commit_repo.get_by_contributor_and_team(
         contributor_id=contributor.id,
@@ -475,24 +773,15 @@ def get_contributor_commits(
         since=since_dt,
         until=until_dt,
         limit=limit,
-        offset=offset
+        offset=offset,
     )
 
-    # Получаем параметры для вычисления качества
     commit_weights = metrics.get("commit_weights", {
-        "feat": 3.0,
-        "fix": 2.0,
-        "refactor": 2.0,
-        "perf": 2.5,
-        "test": 1.5,
-        "docs": 1.0,
-        "style": 0.5,
-        "chore": 0.5,
-        "other": 0.5,
+        "feat": 3.0, "fix": 2.0, "refactor": 2.0, "perf": 2.5,
+        "test": 1.5, "docs": 1.0, "style": 0.5, "chore": 0.5, "other": 0.5,
     })
     significant_min_lines = metrics.get("significant_commit_min_lines", DEFAULT_SIGNIFICANT_MIN_LINES)
 
-    # Формируем список коммитов с оценкой качества
     commits_list = []
     for commit in commits:
         additions = commit.additions or 0
@@ -500,13 +789,8 @@ def get_contributor_commits(
         commit_type = commit.commit_type or "other"
         weight = commit_weights.get(commit_type, 0.5)
 
-        # Вычисляем quality_score
-        # Формула: (additions * weight) / 10, нормализованный к 0-100
         raw_score = additions * weight
-        quality_score = min(int(raw_score / 10), 100)
 
-        # Альтернативная формула для более детальной оценки:
-        # Учитываем типы коммитов
         if commit_type in FEATURE_TYPES:
             quality_multiplier = 1.2
         elif commit_type in BUG_TYPES:
@@ -514,7 +798,6 @@ def get_contributor_commits(
         else:
             quality_multiplier = 0.8
 
-        # Финальный score с учетом множителя
         quality_score = min(int(raw_score / 10 * quality_multiplier), 100)
 
         commits_list.append({
@@ -545,7 +828,7 @@ def get_contributor_commits(
         "commits": commits_list,
         "total": len(commits_list),
         "period": {
-            "days": sprint_days,
+            "days": "all" if is_all_time else sprint_days,
             "since": since_dt.isoformat(),
             "until": until_dt.isoformat(),
         },
@@ -553,4 +836,145 @@ def get_contributor_commits(
             "limit": limit,
             "offset": offset,
         },
+    }
+
+
+@router.get("/team/{team_id}/file-stats")
+def get_file_stats(
+    team_id: int,
+    days: int | str | None = None,
+    top_n: int = 20,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+) -> dict[str, Any]:
+    """
+    File-level analytics for the team:
+    - top_files: most frequently changed files with per-contributor breakdown and daily history
+    - contributor_file_matrix: contributor → {file_path: change_count}
+
+    Used to render "File Hotspots" and "Collaboration Matrix" charts.
+    """
+    team_repo = TeamRepository(db)
+    team = team_repo.get_by_id(team_id)
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    workflow = _get_workflow_config(team)
+    analysis = _get_analysis_config(team)
+    special_commits = analysis.get("special_commits", {})
+    bot_logins = set(special_commits.get("bot_logins", []))
+
+    sprint_cfg = workflow.get("sprint", {})
+    default_sprint_days = sprint_cfg.get("duration_days", DEFAULT_SPRINT_DAYS)
+
+    is_all_time = days == "all"
+    until_dt = datetime.now(timezone.utc)
+
+    if is_all_time:
+        since_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        sprint_days = 9999
+    else:
+        sprint_days = int(days) if days else default_sprint_days
+        since_dt = until_dt - timedelta(days=sprint_days)
+
+    commit_repo = CommitRepository(db)
+    commits = commit_repo.get_by_team_date_range(team_id, since_dt, until_dt)
+
+    if not commits:
+        return {
+            "top_files": [],
+            "contributor_file_matrix": {},
+            "period": {"days": "all" if is_all_time else sprint_days},
+        }
+
+    contributor_repo = ContributorRepository(db)
+    contributor_cache: dict[int, str] = {}
+    for c in contributor_repo.get_all(limit=10000):
+        contributor_cache[c.id] = c.login or c.external_id or "unknown"
+
+    # Build commit → login map
+    commit_login: dict[int, str] = {}
+    for commit in commits:
+        if commit.contributor_id:
+            login = contributor_cache.get(commit.contributor_id, commit.author_name or "unknown")
+        else:
+            login = commit.author_name or "unknown"
+        if login not in bot_logins:
+            commit_login[commit.id] = login
+
+    commit_file_repo = CommitFileRepository(db)
+    commit_ids = [c.id for c in commits if c.id in commit_login]
+
+    # file_path → {changes, additions, deletions, contributors: {login: count}, daily: {date: {add, del}}}
+    file_agg: dict[str, dict] = defaultdict(lambda: {
+        "language": None,
+        "change_count": 0,
+        "total_additions": 0,
+        "total_deletions": 0,
+        "contributors": defaultdict(int),
+        "daily": defaultdict(lambda: {"additions": 0, "deletions": 0}),
+    })
+
+    contributor_file_matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for i in range(0, len(commit_ids), 1000):
+        batch_ids = commit_ids[i:i + 1000]
+        files = commit_file_repo.get_by_commit_ids(batch_ids)
+        for f in files:
+            login = commit_login.get(f.commit_id)
+            if not login:
+                continue
+            fp = f.file_path
+            agg = file_agg[fp]
+            if agg["language"] is None and f.language:
+                agg["language"] = f.language
+            agg["change_count"] += 1
+            agg["total_additions"] += f.additions or 0
+            agg["total_deletions"] += f.deletions or 0
+            agg["contributors"][login] += 1
+            contributor_file_matrix[login][fp] += 1
+
+            # Find commit date for daily breakdown
+            commit = next((c for c in commits if c.id == f.commit_id), None)
+            if commit and commit.authored_at:
+                day_str = str(commit.authored_at.date())
+                agg["daily"][day_str]["additions"] += f.additions or 0
+                agg["daily"][day_str]["deletions"] += f.deletions or 0
+
+    # Sort by change_count and take top_n
+    top_files_sorted = sorted(
+        file_agg.items(), key=lambda x: x[1]["change_count"], reverse=True
+    )[:top_n]
+
+    top_files = []
+    for fp, agg in top_files_sorted:
+        contributors_list = [
+            {"login": login, "change_count": cnt}
+            for login, cnt in sorted(agg["contributors"].items(), key=lambda x: -x[1])
+        ]
+        daily_list = [
+            {"date": d, "additions": v["additions"], "deletions": v["deletions"]}
+            for d, v in sorted(agg["daily"].items())
+        ]
+        top_files.append({
+            "file_path": fp,
+            "language": agg["language"],
+            "change_count": agg["change_count"],
+            "total_additions": agg["total_additions"],
+            "total_deletions": agg["total_deletions"],
+            "contributors": contributors_list,
+            "daily_changes": daily_list,
+        })
+
+    # Slim down contributor_file_matrix to only top_n files
+    top_file_paths = {fp for fp, _ in top_files_sorted}
+    matrix_slim: dict[str, dict[str, int]] = {
+        login: {fp: cnt for fp, cnt in files.items() if fp in top_file_paths}
+        for login, files in contributor_file_matrix.items()
+    }
+
+    return {
+        "top_files": top_files,
+        "contributor_file_matrix": matrix_slim,
+        "period": {"days": "all" if is_all_time else sprint_days},
     }

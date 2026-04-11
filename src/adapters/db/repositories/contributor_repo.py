@@ -24,15 +24,17 @@ class ContributorRepository(BaseRepository[ContributorModel]):
         return list(self.db.scalars(stmt).all())
 
     def get_by_login(
-        self, 
-        login: str, 
+        self,
+        login: str,
         vcs_provider: str | None = None
     ) -> list[ContributorModel]:
-        stmt = select(ContributorModel).where(ContributorModel.login == login)
-        
+        # Also search by external_id — the stats endpoint may display
+        # contributor.external_id as the "login" when contributor.login is None.
+        stmt = select(ContributorModel).where(
+            or_(ContributorModel.login == login, ContributorModel.external_id == login)
+        )
         if vcs_provider:
             stmt = stmt.where(ContributorModel.vcs_provider == vcs_provider)
-        
         return list(self.db.scalars(stmt).all())
 
     def get_or_create(
