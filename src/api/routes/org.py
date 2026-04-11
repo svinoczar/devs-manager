@@ -16,6 +16,7 @@ class OrgCreate(BaseModel):
     name: str
     main_vcs: VCS = VCS.github
     company_size: CompanySize = CompanySize.big
+    sprint_length_days: int | None = 14
 
 
 class OrgResponse(BaseModel):
@@ -26,6 +27,7 @@ class OrgResponse(BaseModel):
     owner_id: int
     main_vcs: str
     company_size: str
+    sprint_length_days: int | None = None
     emoji: str | None = None
 
 
@@ -59,6 +61,7 @@ def create_organization(
         owner_id=current_user.id,
         main_vcs=org_data.main_vcs,
         company_size=org_data.company_size,
+        sprint_length_days=org_data.sprint_length_days,
     )
     return org
 

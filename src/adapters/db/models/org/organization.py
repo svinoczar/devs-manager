@@ -2,6 +2,7 @@ from datetime import datetime
 from sqlalchemy import (
     TIMESTAMP,
     String,
+    Integer,
     ForeignKey,
     Enum as SAEnum,
     func,
@@ -37,6 +38,13 @@ class OrganizationModel(Base):
         SAEnum(CompanySize, name="company_size_enum"),
         nullable=False,
         default=CompanySize.big,
+    )
+
+    sprint_length_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=14,
+        comment="Длительность спринта в днях (по умолчанию 14)"
     )
 
     emoji: Mapped[str | None] = mapped_column(String(10), nullable=True)
