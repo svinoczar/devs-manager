@@ -5,30 +5,120 @@
         {
           "name": "Feature",
           "category": "feat",
-          "keywords": ["feat", "feature", "добавил", "добавление", "новая", "implement", "add"],
+          "keywords": [
+            "feat", "feature", "добавил", "добавление", "новая", "implement", "implemented",
+            "add", "adds", "added", "new", "introduce", "introduced",
+            "enable", "enables", "enabled", "show", "shows", "display", "displays",
+            "support", "supports", "allow", "allows", "expose",
+            "create", "creates", "created", "mark", "marks", "set", "sets",
+            "register", "registers", "provide", "provides"
+          ],
           "languages": ["en", "ru", "*"],
-          "priority": 95
+          "priority": 50
         },
         {
           "name": "Bugfix",
           "category": "fix",
-          "keywords": ["fix", "bug", "исправил", "починил", "ошибка", "bugfix"],
-          "languages": ["en", "ru", "*"],
-          "priority": 99
-        },
-        {
-          "name": "Refactor",
-          "category": "refactor",
-          "keywords": ["refactor", "рефактор", "переписал", "cleanup"],
+          "keywords": [
+            "fix", "fixes", "fixed", "bug", "bugfix", "hotfix",
+            "исправил", "починил", "ошибка", "patch", "patches",
+            "correct", "corrects", "corrected", "resolve", "resolves", "resolved",
+            "repair", "repairs", "repaired", "workaround"
+          ],
           "languages": ["en", "ru", "*"],
           "priority": 80
         },
         {
+          "name": "Refactor",
+          "category": "refactor",
+          "keywords": [
+            "refactor", "refactors", "refactored", "рефактор", "переписал", "cleanup",
+            "rename", "renames", "renamed", "move", "moves", "moved",
+            "extract", "extracts", "extracted", "restructure", "restructured",
+            "reorganize", "reorganized", "simplify", "simplified",
+            "clean up", "clean-up", "rewrite", "rewrites", "rewritten"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 70
+        },
+        {
           "name": "Testing",
           "category": "test",
-          "keywords": ["test", "testing", "тест"],
+          "keywords": [
+            "test", "tests", "testing", "тест", "spec", "specs",
+            "unit test", "integration test", "e2e", "coverage"
+          ],
           "languages": ["en", "ru", "*"],
-          "priority": 100
+          "priority": 90
+        },
+        {
+          "name": "Documentation",
+          "category": "docs",
+          "keywords": [
+            "docs", "doc", "documentation", "readme", "comment", "comments",
+            "документация", "changelog", "licence", "license", "contributing",
+            "jsdoc", "typedoc", "docstring", "annotate", "annotation"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 65
+        },
+        {
+          "name": "Chore",
+          "category": "chore",
+          "keywords": [
+            "chore", "update dependencies", "bump", "dependencies", "upgrade",
+            "remove", "removes", "removed", "delete", "deletes", "deleted", "drop",
+            "deprecate", "deprecates", "deprecated", "disable", "disables",
+            "typo", "spelling", "whitespace", "formatting"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 45
+        },
+        {
+          "name": "Style",
+          "category": "style",
+          "keywords": [
+            "style", "styling", "styles", "lint", "linting", "prettier", "eslint",
+            "format", "formats", "formatted", "indent", "indentation"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 55
+        },
+        {
+          "name": "Revert",
+          "category": "revert",
+          "keywords": ["revert", "rollback", "откат", "undo"],
+          "languages": ["en", "ru", "*"],
+          "priority": 110
+        },
+        {
+          "name": "Merge",
+          "category": "merge",
+          "keywords": ["merge pull request", "merge branch", "merge mr"],
+          "languages": ["en", "ru", "*"],
+          "priority": 120
+        },
+        {
+          "name": "Performance",
+          "category": "perf",
+          "keywords": [
+            "perf", "performance", "optimize", "optimizes", "optimized",
+            "faster", "speed up", "improve performance", "производительность",
+            "cache", "caches", "cached", "lazy", "memoize", "debounce", "throttle"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 85
+        },
+        {
+          "name": "Build",
+          "category": "build",
+          "keywords": [
+            "build", "ci", "cd", "pipeline", "deploy", "deployment",
+            "release", "сборка", "docker", "container", "workflow",
+            "github actions", "gitlab ci", "jenkins"
+          ],
+          "languages": ["en", "ru", "*"],
+          "priority": 60
         }
       ]
     }
