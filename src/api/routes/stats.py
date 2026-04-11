@@ -905,14 +905,17 @@ def get_file_stats(
     commit_file_repo = CommitFileRepository(db)
     commit_ids = [c.id for c in commits if c.id in commit_login]
 
-    # file_path → {changes, additions, deletions, contributors: {login: count}, daily: {date: {add, del}}}
+    # Build fast lookup: commit_id → commit
+    commit_map: dict[int, Any] = {c.id: c for c in commits}
+
+    # file_path → {changes, additions, deletions, contributors: {login: count}, commits: [...]}
     file_agg: dict[str, dict] = defaultdict(lambda: {
         "language": None,
         "change_count": 0,
         "total_additions": 0,
         "total_deletions": 0,
         "contributors": defaultdict(int),
-        "daily": defaultdict(lambda: {"additions": 0, "deletions": 0}),
+        "commits": [],
     })
 
     contributor_file_matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -934,12 +937,16 @@ def get_file_stats(
             agg["contributors"][login] += 1
             contributor_file_matrix[login][fp] += 1
 
-            # Find commit date for daily breakdown
-            commit = next((c for c in commits if c.id == f.commit_id), None)
-            if commit and commit.authored_at:
-                day_str = str(commit.authored_at.date())
-                agg["daily"][day_str]["additions"] += f.additions or 0
-                agg["daily"][day_str]["deletions"] += f.deletions or 0
+            commit = commit_map.get(f.commit_id)
+            if commit:
+                agg["commits"].append({
+                    "sha": commit.sha,
+                    "short_sha": commit.sha[:7] if commit.sha else "",
+                    "authored_at": commit.authored_at.isoformat() if commit.authored_at else None,
+                    "author_login": login,
+                    "additions": f.additions or 0,
+                    "deletions": f.deletions or 0,
+                })
 
     # Sort by change_count and take top_n
     top_files_sorted = sorted(
@@ -952,10 +959,10 @@ def get_file_stats(
             {"login": login, "change_count": cnt}
             for login, cnt in sorted(agg["contributors"].items(), key=lambda x: -x[1])
         ]
-        daily_list = [
-            {"date": d, "additions": v["additions"], "deletions": v["deletions"]}
-            for d, v in sorted(agg["daily"].items())
-        ]
+        commits_history = sorted(
+            agg["commits"],
+            key=lambda x: x["authored_at"] or "",
+        )
         top_files.append({
             "file_path": fp,
             "language": agg["language"],
@@ -963,7 +970,7 @@ def get_file_stats(
             "total_additions": agg["total_additions"],
             "total_deletions": agg["total_deletions"],
             "contributors": contributors_list,
-            "daily_changes": daily_list,
+            "commits_history": commits_history,
         })
 
     # Slim down contributor_file_matrix to only top_n files
