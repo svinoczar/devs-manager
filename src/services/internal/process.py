@@ -325,6 +325,7 @@ def process_single_commit(
     db_repo_id: int,
     db_contributors: dict,
     session: SessionLocal,
+    branch_name: str | None = None,
 ) -> dict:
     """
     Обрабатывает один коммит: получает детали, обогащает, сохраняет в БД.
@@ -431,6 +432,7 @@ def process_single_commit(
         is_revert_commit=commit_obj.is_revert_commit,
         parents_count=commit_obj.parents_count,
         files_changed=commit_obj.files_changed,
+        branch_name=branch_name,
     )
 
     # Сохраняем файлы коммита

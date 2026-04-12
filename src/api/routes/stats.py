@@ -258,8 +258,8 @@ def _compute_stability_metrics(
     if total_added == 0:
         return {"weekly_stability": 100.0, "sprint_stability": 100.0}
 
-    weekly_stability = round((total_added - churned_week) / total_added * 100, 1)
-    sprint_stability = round((total_added - churned_sprint) / total_added * 100, 1)
+    weekly_stability = min(round((total_added - churned_week) / total_added * 100, 1), 100.0)
+    sprint_stability = min(round((total_added - churned_sprint) / total_added * 100, 1), 100.0)
     return {"weekly_stability": weekly_stability, "sprint_stability": sprint_stability}
 
 
@@ -296,7 +296,7 @@ def _compute_comment_ratio(
 
     if total_added == 0:
         return 0.0
-    return round(comment_added / total_added * 100, 1)
+    return min(round(comment_added / total_added * 100, 1), 100.0)
 
 
 @router.get("/team/{team_id}/sprint-stats")
@@ -451,6 +451,10 @@ def get_sprint_stats(
         if login in bot_logins:
             continue
 
+        # Skip merge commits: their diff is an aggregate of the branch and inflates metrics
+        if commit.is_merge_commit:
+            continue
+
         commit_type = commit.commit_type or "chore"
         additions = commit.additions or 0
         deletions = commit.deletions or 0
@@ -570,19 +574,10 @@ def get_sprint_stats(
         commits_by_type = dict(cs["commits_by_type"])
         total = cs["total_commits"]
 
-        reversion_ratio = (cs["revert_commits"] / total * 100) if total > 0 else 0
-        breaking_ratio = (cs["breaking_commits"] / total * 100) if total > 0 else 0
-
-        doc_ratio = ((cs["doc_commits"] + cs["commits_with_docs"]) / total * 100) if total > 0 else 0
-
-        functional_commits = (
-            sum(cs["commits_by_type"].get(t, 0) for t in FEATURE_TYPES)
-            + cs["commits_by_type"].get("fix", 0)
-        )
-        test_ratio = (
-            (cs["test_commits"] + cs["commits_with_tests"]) / functional_commits * 100
-            if functional_commits > 0 else 0
-        )
+        reversion_ratio = min((cs["revert_commits"] / total * 100) if total > 0 else 0, 100.0)
+        breaking_ratio = min((cs["breaking_commits"] / total * 100) if total > 0 else 0, 100.0)
+        doc_ratio = min(((cs["doc_commits"] + cs["commits_with_docs"]) / total * 100) if total > 0 else 0, 100.0)
+        test_ratio = min(((cs["test_commits"] + cs["commits_with_tests"]) / total * 100) if total > 0 else 0, 100.0)
 
         # Code stability metrics
         contributor_commits_sorted = sorted(
@@ -892,9 +887,11 @@ def get_file_stats(
     for c in contributor_repo.get_all(limit=10000):
         contributor_cache[c.id] = c.login or c.external_id or "unknown"
 
-    # Build commit → login map
+    # Build commit → login map (exclude merge commits and bots)
     commit_login: dict[int, str] = {}
     for commit in commits:
+        if commit.is_merge_commit:
+            continue
         if commit.contributor_id:
             login = contributor_cache.get(commit.contributor_id, commit.author_name or "unknown")
         else:

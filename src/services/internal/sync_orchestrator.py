@@ -6,7 +6,7 @@ import threading
 
 from src.adapters.db.base import SessionLocal
 from src.services.internal.process import process_single_commit, get_existing_commit_shas
-from src.services.external.github_stats_manual import get_commits_paginated, get_contributors, get_commits_count
+from src.services.external.github_stats_manual import get_commits_paginated, get_contributors, get_commits_count, get_default_branch
 from src.adapters.db.repositories.contributor_repo import ContributorRepository
 from src.adapters.db.repositories.sync_session_repo import SyncSessionRepository
 from src.util.logger import logger
@@ -104,6 +104,10 @@ class SyncOrchestrator:
         self.progress.start_time = datetime.now(timezone.utc)
         logger.info("[sync_orchestrator:sync_repository] Starting streaming sync for %s/%s (session_id=%s, sprint_days=%d)",
                    owner, repo, session_id, sprint_days)
+
+        # Get default branch name for storing with commits
+        default_branch = get_default_branch(owner, repo, token)
+        logger.info("[sync_orchestrator:sync_repository] Default branch: %s", default_branch)
 
         sprint_cutoff = datetime.now(timezone.utc) - timedelta(days=sprint_days)
         logger.info("[sync_orchestrator:sync_repository] Sprint cutoff date: %s", sprint_cutoff.isoformat())
@@ -219,7 +223,7 @@ class SyncOrchestrator:
                     logger.info("[sync_orchestrator:sync_repository] Processing %d sprint commits from page %d (workers=%d)",
                               len(sprint_batch), page_num, self.max_workers)
                     result = self._process_commits_parallel(
-                        sprint_batch, owner, repo, token, settings, db_repo_id, db_contributors
+                        sprint_batch, owner, repo, token, settings, db_repo_id, db_contributors, default_branch
                     )
                     sprint_new += result["new"]
                     logger.debug("[sync_orchestrator:sync_repository] Sprint batch processed: %d new, %d skipped",
@@ -236,7 +240,7 @@ class SyncOrchestrator:
                         logger.info("[sync_orchestrator:sync_repository] Processing %d archive commits from page %d (workers=%d)",
                                   len(archive_batch), page_num, self.max_workers)
                         result = self._process_commits_parallel(
-                            archive_batch, owner, repo, token, settings, db_repo_id, db_contributors
+                            archive_batch, owner, repo, token, settings, db_repo_id, db_contributors, default_branch
                         )
                         archive_new += result["new"]
                         logger.debug("[sync_orchestrator:sync_repository] Archive batch processed: %d new, %d skipped",
@@ -341,7 +345,8 @@ class SyncOrchestrator:
         token: str,
         settings: str,
         db_repo_id: int,
-        db_contributors: dict
+        db_contributors: dict,
+        branch_name: str | None = None,
     ) -> dict:
         """
         Параллельно обрабатывает список коммитов.
@@ -388,7 +393,7 @@ class SyncOrchestrator:
             futures = {
                 executor.submit(
                     self._process_single_commit_wrapper,
-                    commit_json, owner, repo, token, settings, db_repo_id, db_contributors
+                    commit_json, owner, repo, token, settings, db_repo_id, db_contributors, branch_name
                 ): commit_json["sha"]
                 for commit_json in commits_to_process
             }
@@ -423,7 +428,8 @@ class SyncOrchestrator:
         token: str,
         settings: str,
         db_repo_id: int,
-        db_contributors: dict
+        db_contributors: dict,
+        branch_name: str | None = None,
     ) -> dict:
         """
         Обёртка для обработки одного коммита с rate limiting и session management.
@@ -457,7 +463,8 @@ class SyncOrchestrator:
                     settings=settings,
                     db_repo_id=db_repo_id,
                     db_contributors=db_contributors,
-                    session=session
+                    session=session,
+                    branch_name=branch_name,
                 )
                 if result["created"]:
                     logger.debug("[sync_orchestrator:_process_single_commit_wrapper] ✓ Created commit %s", sha[:7])

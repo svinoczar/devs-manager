@@ -78,6 +78,7 @@ class CommitRepository(BaseRepository[CommitModel]):
         is_revert_commit: bool | None = None,
         parents_count: int | None = None,
         files_changed: int | None = None,
+        branch_name: str | None = None,
     ) -> CommitModel | None:
         
         commit = self.get_by_id(commit_id)
@@ -124,6 +125,8 @@ class CommitRepository(BaseRepository[CommitModel]):
             commit.parents_count = parents_count
         if files_changed is not None:
             commit.files_changed = files_changed
+        if branch_name is not None:
+            commit.branch_name = branch_name
 
         self.db.commit()
         self.db.refresh(commit)

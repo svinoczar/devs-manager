@@ -78,6 +78,25 @@ def github_request_with_retry(url, headers, params=None, max_retries=5):
     raise requests.HTTPError(f"Max retries ({max_retries}) exceeded")
 
 
+def get_default_branch(owner: str, repo: str, token: str | None = None) -> str:
+    """Return the default branch name for a repository (e.g. 'main', 'master')."""
+    if token is None:
+        token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        return "main"
+    url = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Authorization": f"token {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    try:
+        response = github_request_with_retry(url, headers, {})
+        return response.json().get("default_branch", "main")
+    except Exception:
+        return "main"
+
+
 def get_commits_list(
     owner,
     repo,
