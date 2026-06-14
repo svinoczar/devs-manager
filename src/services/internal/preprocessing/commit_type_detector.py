@@ -13,11 +13,8 @@ CONVENTIONAL_COMMIT_RE = re.compile(
 # Word-boundary keyword matching — avoids "sessions" matching "test", "fix" matching "suffix", etc.
 def _word_match(keyword: str, text: str) -> bool:
     """Check if keyword appears as a whole word in text."""
-    # Short keywords (<=3 chars) require word boundaries; longer ones can use substring
-    if len(keyword) <= 3:
-        pattern = r"\b" + re.escape(keyword) + r"\b"
-        return bool(re.search(pattern, text, re.IGNORECASE))
-    return keyword.lower() in text.lower()
+    pattern = r"\b" + re.escape(keyword) + r"\b"
+    return bool(re.search(pattern, text, re.IGNORECASE))
 
 
 class HeuristicCommitClassifier:

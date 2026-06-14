@@ -77,6 +77,7 @@ class CommitRepository(BaseRepository[CommitModel]):
         is_pr_commit: bool | None = None,
         is_revert_commit: bool | None = None,
         parents_count: int | None = None,
+        parent_sha: str | None = None,
         files_changed: int | None = None,
         branch_name: str | None = None,
     ) -> CommitModel | None:
@@ -123,6 +124,8 @@ class CommitRepository(BaseRepository[CommitModel]):
 
         if parents_count is not None:
             commit.parents_count = parents_count
+        if parent_sha is not None:
+            commit.parent_sha = parent_sha
         if files_changed is not None:
             commit.files_changed = files_changed
         if branch_name is not None:

@@ -62,6 +62,7 @@ class CommitModel(Base):
     )
 
     parents_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parent_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     files_changed: Mapped[int | None] = mapped_column(Integer, nullable=True)
     branch_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_revert_commit: Mapped[bool | None] = mapped_column(

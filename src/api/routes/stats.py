@@ -142,7 +142,7 @@ def _calc_dqi(
     Weights:
     - 25% — functional commits (feat/perf/refactor)
     - 10% — bug fixes
-    - 15% — significant changes
+    - 15% — significant changes 
     - 15% — reversion stability
     - 15% — code stability (sprint)
     - 5%  — no breaking changes
@@ -943,6 +943,8 @@ def get_file_stats(
                     "author_login": login,
                     "additions": f.additions or 0,
                     "deletions": f.deletions or 0,
+                    "parent_sha": commit.parent_sha,
+                    "is_merge_commit": commit.is_merge_commit or False,
                 })
 
     # Sort by change_count and take top_n

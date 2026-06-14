@@ -29,9 +29,10 @@ class Commit(BaseModel):
     conventional_scope: Optional[str] = None 
     is_breaking_change: Optional[bool] = None
 
-    is_merge_commit: Optional[bool] = None 
-    is_pr_commit: Optional[bool] = None 
+    is_merge_commit: Optional[bool] = None
+    is_pr_commit: Optional[bool] = None
 
-    parents_count: Optional[int] = None 
-    files_changed: Optional[int] = None 
+    parents_count: Optional[int] = None
+    parent_sha: Optional[str] = None
+    files_changed: Optional[int] = None
     is_revert_commit: Optional[bool] = None 

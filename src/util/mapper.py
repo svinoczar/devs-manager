@@ -163,4 +163,5 @@ def single_commit_dto_to_domain_commit_dto(dto: SingleCommitEntity) -> Commit:
             for f in dto.files
             if f.patch
         ],
+        parent_sha=dto.parents[0].sha if dto.parents else None,
     )

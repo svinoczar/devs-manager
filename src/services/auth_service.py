@@ -60,7 +60,7 @@ class AuthService:
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password",
+                detail="Неверное имя пользователя или пароль",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
@@ -68,7 +68,7 @@ class AuthService:
         if not verify_password(login_data.password, user.hashed_password):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password",
+                detail="Неверное имя пользователя или пароль",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 

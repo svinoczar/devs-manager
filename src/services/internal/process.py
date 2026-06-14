@@ -431,6 +431,7 @@ def process_single_commit(
         is_pr_commit=commit_obj.is_pr_commit,
         is_revert_commit=commit_obj.is_revert_commit,
         parents_count=commit_obj.parents_count,
+        parent_sha=commit_obj.parent_sha,
         files_changed=commit_obj.files_changed,
         branch_name=branch_name,
     )
